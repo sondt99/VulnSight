@@ -6,16 +6,25 @@ is too vague, and titles rarely say "BOLA" or "BFLA" explicitly. This module
 asks an LLM to read each advisory and decide whether it *really* belongs to the
 target bug class, returning a structured verdict we can filter/sort on.
 
-Provider is configured via environment (see .env.example):
+Provider is configured via environment (see .env.example). Both providers can
+be configured side by side; CVE_AI_PROVIDER picks the active one:
 
-  CVE_AI_PROVIDER=anthropic          # only "anthropic" implemented for now
-  AI_BASE_URL=https://your-ai-endpoint.example.com
-  AI_TOKEN=sk-...
-  AI_MODEL=model-xyz
+  CVE_AI_PROVIDER=anthropic          # "anthropic" or "glm"
 
-The endpoint is Anthropic Messages-API compatible: POST {BASE_URL}/v1/messages
-with headers x-api-key + anthropic-version. We use only the Python stdlib
-(urllib) so the app has no extra runtime dependency beyond Flask.
+  # anthropic (Anthropic Messages-API compatible, e.g. ai.nosiaht.com)
+  ANTHROPIC_BASE_URL=...   ANTHROPIC_TOKEN=sk-...   ANTHROPIC_MODEL=...
+
+  # glm (Zhipu/BigModel OpenAI-compatible chat-completions)
+  GLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+  GLM_TOKEN=<id>.<secret>  GLM_MODEL=glm-4.5-flash
+
+The legacy generic names AI_BASE_URL / AI_TOKEN / AI_MODEL still work as a
+fallback for whichever provider is active.
+
+anthropic endpoints get POST {BASE_URL}/v1/messages with headers x-api-key +
+anthropic-version; glm endpoints get POST {BASE_URL}/chat/completions with
+"Authorization: Bearer <token>". We use only the Python stdlib (urllib) so the
+app has no extra runtime dependency beyond Flask.
 """
 
 from __future__ import annotations
@@ -74,15 +83,37 @@ class AIConfig:
 
     @property
     def messages_url(self) -> str:
+        if self.provider == "glm":
+            return self.base_url.rstrip("/") + "/chat/completions"
         return self.base_url.rstrip("/") + "/v1/messages"
 
 
-def load_config() -> AIConfig:
+# Default endpoints per provider; anthropic-compatible proxies vary, so no default.
+_PROVIDER_DEFAULT_BASE_URL = {
+    "glm": "https://open.bigmodel.cn/api/paas/v4",
+}
+
+
+def _env(provider: str, suffix: str) -> str:
+    """Provider-prefixed env var (e.g. GLM_TOKEN), falling back to AI_<suffix>."""
+    return (os.environ.get(f"{provider.upper()}_{suffix}", "").strip()
+            or os.environ.get(f"AI_{suffix}", "").strip())
+
+
+def load_config(provider: str | None = None) -> AIConfig:
+    """Load config for `provider` (default: the active CVE_AI_PROVIDER).
+
+    Each provider reads its own prefixed vars (ANTHROPIC_* / GLM_*) so both can
+    live in .env at once; the generic AI_* names remain a fallback.
+    """
+    provider = (provider
+                or os.environ.get("CVE_AI_PROVIDER", "anthropic")).strip().lower()
     return AIConfig(
-        provider=os.environ.get("CVE_AI_PROVIDER", "anthropic").strip().lower(),
-        base_url=os.environ.get("AI_BASE_URL", "").strip(),
-        token=os.environ.get("AI_TOKEN", "").strip(),
-        model=os.environ.get("AI_MODEL", "").strip(),
+        provider=provider,
+        base_url=_env(provider, "BASE_URL")
+                 or _PROVIDER_DEFAULT_BASE_URL.get(provider, ""),
+        token=_env(provider, "TOKEN"),
+        model=_env(provider, "MODEL"),
     )
 
 
@@ -92,19 +123,33 @@ def load_config() -> AIConfig:
 
 def _call_messages(cfg: AIConfig, system: str, user: str,
                    max_tokens: int = 512, timeout: int = 45) -> str:
-    payload = {
-        "model": cfg.model,
-        "max_tokens": max_tokens,
-        "system": system,
-        "messages": [{"role": "user", "content": user}],
-    }
+    if cfg.provider == "glm":
+        # GLM (Zhipu/BigModel) speaks the OpenAI chat-completions shape: the
+        # system prompt is just another entry in "messages", not a top-level field.
+        payload = {
+            "model": cfg.model,
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }
+    else:
+        payload = {
+            "model": cfg.model,
+            "max_tokens": max_tokens,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+        }
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(cfg.messages_url, data=data, method="POST")
     req.add_header("content-type", "application/json")
-    req.add_header("x-api-key", cfg.token)
-    req.add_header("anthropic-version", ANTHROPIC_VERSION)
-    # Some proxies also accept a bearer token; harmless to send both.
     req.add_header("authorization", f"Bearer {cfg.token}")
+    if cfg.provider != "glm":
+        # Anthropic Messages API wants the key on this header too. Some proxies
+        # in front of it also accept a bearer token; harmless to send both.
+        req.add_header("x-api-key", cfg.token)
+        req.add_header("anthropic-version", ANTHROPIC_VERSION)
     # Some proxy endpoints sit behind Cloudflare which returns error 1010 for the default
     # urllib client signature. Present a normal browser-ish User-Agent + Accept.
     req.add_header("user-agent", USER_AGENT)
