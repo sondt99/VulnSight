@@ -1,0 +1,8 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+advisories.db
+advisories.db-wal
+advisories.db-shm
+osv_cache/

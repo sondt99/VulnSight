@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VulnSight</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="logo">🛡️</div>
+      <div>
+        <h1>VulnSight</h1>
+        <div class="sub">Filter GitHub Security Advisories by bug class &amp; CWE — refine with AI</div>
+      </div>
+    </div>
+    <div class="status-pills">
+      <span class="pill"><span class="dot {{ 'ok' if gh_ok else 'bad' }}"></span> gh {{ 'authed' if gh_ok else 'not authed' }}</span>
+      <span class="pill"><span class="dot {{ 'ok' if ai_configured else 'bad' }}"></span> AI {{ 'ready' if ai_configured else 'off' }}</span>
+      <span class="pill" id="ai-test-pill" style="cursor:pointer" title="Test AI endpoint">⚡ Test AI</span>
+      <span class="pill">💾 {{ cached_count }} cached</span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside>
+      <div class="field">
+        <label>⚡ Quick scenario <span class="hint">(fills everything)</span></label>
+        <select id="scenario">
+          <option value="">— pick a preset —</option>
+          {% for s in scenarios %}
+          <option value="{{ s.key }}">{{ s.label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <div class="field">
+        <label>Data sources</label>
+        <div class="cats" style="gap:2px">
+          <label class="cat" style="padding:7px 8px" title="GitHub Advisory Database — server-side CWE filter, any ecosystem">
+            <input type="checkbox" name="source" value="ghsa" checked>
+            <span class="c-label">GHSA <span class="c-desc">— GitHub, filters by CWE directly</span></span>
+          </label>
+          <label class="cat" style="padding:7px 8px" title="OSV.dev bulk export — broader coverage, filtered locally by CWE">
+            <input type="checkbox" name="source" value="osv">
+            <span class="c-label">OSV.dev <span class="c-desc">— aggregates GO-/RUSTSEC-/… , needs an ecosystem</span></span>
+          </label>
+          <label class="cat" style="padding:7px 8px" title="OSV source-native records (GO-/RUSTSEC-/PYSEC-) that have NO CWE tag — keyword-prefiltered, classified by AI">
+            <input type="checkbox" name="source" value="osv-native">
+            <span class="c-label">OSV native <span class="c-desc">— no-CWE records, found via AI (run Refine)</span></span>
+          </label>
+        </div>
+        <label class="check" style="margin-top:7px" title="Re-download the OSV bulk export even if cached">
+          <input type="checkbox" id="refresh_osv"> <span class="hint">Force refresh OSV cache (~10MB/ecosystem)</span></label>
+      </div>
+
+      <div class="field">
+        <label>Bug classes <span class="hint">(CWE-based)</span></label>
+        <div class="cats">
+          {% for c in categories %}
+          <label class="cat">
+            <input type="checkbox" name="category" value="{{ c.key }}" {{ 'checked' if c.key == 'bac' else '' }}>
+            <span>
+              <span class="c-label">{{ c.label }}</span><br>
+              <span class="c-desc">{{ c.description }}</span>
+            </span>
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="field">
+        <label class="check"><input type="checkbox" id="include_extended" checked>
+          Include extended CWEs <span class="hint">(higher recall, more noise)</span></label>
+      </div>
+
+      <div class="row">
+        <div class="field">
+          <label>Ecosystem</label>
+          <select id="ecosystem">
+            <option value="any">Any</option>
+            {% for e in ecosystems %}<option value="{{ e }}" {{ 'selected' if e=='maven' else '' }}>{{ e }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label>Severity</label>
+          <select id="severity">
+            <option value="any">Any</option>
+            {% for s in severities %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+          </select>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Package <span class="hint">(pick a suggestion, optional)</span></label>
+        <select id="affects_pick"><option value="">— any package —</option></select>
+      </div>
+
+      <div class="row">
+        <div class="field">
+          <label>Published</label>
+          <select id="published">
+            <option value="any" selected>Any time</option>
+            <option value="7d">Last 7 days</option>
+            <option value="30d">Last 30 days</option>
+            <option value="90d">Last 90 days</option>
+            <option value="180d">Last 6 months</option>
+            <option value="1y">Last year</option>
+            <option value="2y">Last 2 years</option>
+            <option value="2020">Since 2020</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Max results</label>
+          <select id="max_results">
+            <option value="25">25</option>
+            <option value="50">50</option>
+            <option value="100" selected>100</option>
+            <option value="200">200</option>
+            <option value="500">500</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="field">
+          <label>Sort by</label>
+          <select id="sort">
+            <option value="published" selected>Published</option>
+            <option value="updated">Updated</option>
+            <option value="cve_id">CVE ID</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Order</label>
+          <select id="direction">
+            <option value="desc" selected>Newest first</option>
+            <option value="asc">Oldest first</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="field">
+          <label>Advisory type</label>
+          <select id="type">
+            <option value="reviewed" selected>reviewed</option>
+            <option value="unreviewed">unreviewed</option>
+            <option value="malware">malware</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Extra CWEs <span class="hint">(tick to add, optional)</span></label>
+        <details class="cwe-catalog">
+          <summary><span id="extra_cwes_count">none</span> selected — click to choose</summary>
+          <div class="cats" style="max-height:200px;margin-top:6px">
+            {% for c in cwe_catalog %}
+            <label class="cat" style="padding:4px 6px">
+              <input type="checkbox" name="extra_cwe" value="{{ c.id }}">
+              <span class="c-label" style="font-weight:500">CWE-{{ c.id }} · <span style="color:var(--muted);font-weight:400">{{ c.label }}</span></span>
+            </label>
+            {% endfor %}
+          </div>
+        </details>
+      </div>
+
+      <button class="primary" id="auto-btn" title="Pick optimal sources, search, run AI, and show only real matches — all in one click">⚡ Auto — best results</button>
+      <button id="search-btn" style="width:100%;margin-top:8px" title="Just fetch advisories, no AI">🔍 Search only</button>
+    </aside>
+
+    <main>
+      <div class="toolbar">
+        <div class="summary" id="summary">Step ① pick bug classes on the left and hit Search.</div>
+        <div class="spacer"></div>
+        <button class="ai" id="ai-btn" disabled title="Ask the AI to score the current results">② ✨ Refine with AI</button>
+        <button id="retry-btn" class="warn-btn" disabled title="Re-run the AI on advisories that errored">↻ Retry failed</button>
+        <label class="check" id="only_match_label" title="Runs AI first if needed, then hides non-matches">
+          <input type="checkbox" id="only_match" disabled> ③ Only AI matches</label>
+        <details class="export-menu">
+          <summary id="export-btn">⬇ Export</summary>
+          <div class="export-pop">
+            <button data-fmt="csv">📄 CSV (.csv)</button>
+            <button data-fmt="json">🧩 JSON (.json)</button>
+            <button data-fmt="csv-matches">✅ CSV — AI matches only</button>
+          </div>
+        </details>
+      </div>
+      <div id="results">
+        <div class="empty">
+          <b>Easiest way:</b> pick a <b>Quick scenario</b> (or bug classes) on the left, then hit
+          <b>⚡ Auto — best results</b>. It picks the optimal sources, searches, runs the AI, and
+          shows only the confirmed matches — one click.<br><br>
+          <b>Or do it step by step:</b><br>
+          ① <b>🔍 Search only</b> (CWE filter, no AI) &nbsp; ② <b>✨ Refine with AI</b> (score each) &nbsp; ③ <b>Only AI matches</b> (hide false positives)<br><br>
+          <span style="color:var(--muted)">Tip: BAC + Java (maven) is preselected. Auto uses GHSA, and adds OSV-native (no-CWE, AI-found) records for Go/PyPI/Rust.</span>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    window.BOOT = {
+      POPULAR: {{ popular_packages|tojson }},
+      SCENARIOS: {{ scenarios|tojson }},
+      OSV_SUPPORTED: {{ osv_supported|tojson }},
+      AI_CONFIGURED: {{ ai_configured|tojson }},
+    };
+  </script>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
