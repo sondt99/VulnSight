@@ -42,6 +42,10 @@
             <input type="checkbox" name="source" value="ghsa" checked>
             <span class="c-label">GHSA <span class="c-desc">— GitHub, filters by CWE directly</span></span>
           </label>
+          <label class="cat" style="padding:7px 8px" title="NIST National Vulnerability Database — CWE filter, CVSS v3/v4, CPE, KEV">
+            <input type="checkbox" name="source" value="nvd">
+            <span class="c-label">NVD <span class="c-desc">— NIST CVEs, CWE filter, CVSS/CPE/KEV (slower, rate-limited)</span></span>
+          </label>
           <label class="cat" style="padding:7px 8px" title="OSV.dev bulk export — broader coverage, filtered locally by CWE">
             <input type="checkbox" name="source" value="osv">
             <span class="c-label">OSV.dev <span class="c-desc">— aggregates GO-/RUSTSEC-/… , needs an ecosystem</span></span>

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from . import cache
 from . import ghsa_client as ghsa
+from . import nvd_client
 from . import osv_client
 from .cwe_categories import cwe_label, normalize_cwe_id, resolve_cwes
 
@@ -175,6 +176,24 @@ def run_search(q: SearchQuery) -> SearchOutcome:
                 per_source["osv"] = len(o)
             except osv_client.OsvError as e:
                 warnings.append(f"OSV fetch failed: {e}")
+
+    # --- NVD (server-side CWE filter via NIST API v2) ---
+    if "nvd" in q.sources:
+        nvd_params = nvd_client.NvdSearchParams(
+            cwes=q.cwes,
+            keyword=q.affects,
+            severity=q.severity,
+            published_range=q.published,
+            max_results=q.max_results,
+        )
+        try:
+            n = nvd_client.fetch_nvd(nvd_params)
+            collected += n
+            per_source["nvd"] = len(n)
+        except nvd_client.NvdError as e:
+            if q.sources == ["nvd"]:
+                raise SearchError(f"NVD fetch failed: {e}", 502)
+            warnings.append(f"NVD fetch failed: {e}")
 
     # --- OSV native (no CWE) — needs the AI pass to be useful ---
     if "osv-native" in q.sources:

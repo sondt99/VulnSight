@@ -196,7 +196,9 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
         sources: sources,
         refresh_osv: $('#refresh_osv').checked,
       };
-      if (sources.includes('osv')) {
+      if (sources.includes('nvd')) {
+        $('#results').innerHTML = `<div class="loading"><span class="spinner"></span>Fetching… (NVD is rate-limited — may take a moment per CWE)</div>`;
+      } else if (sources.includes('osv')) {
         $('#results').innerHTML = `<div class="loading"><span class="spinner"></span>Fetching… (OSV may download a ~10MB list on first use)</div>`;
       }
       try {

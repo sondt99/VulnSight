@@ -71,6 +71,71 @@ def make_osv_zip(records):
     return buf.getvalue()
 
 
+# --- sample raw NVD record (one element of the "vulnerabilities" array) ------
+NVD_VULN = {
+    "cve": {
+        "id": "CVE-2021-44228",
+        "sourceIdentifier": "security@apache.org",
+        "published": "2021-12-10T10:15:09.143",
+        "lastModified": "2026-06-17T04:12:05.460",
+        "vulnStatus": "Analyzed",
+        "descriptions": [
+            {"lang": "en", "value": "Apache Log4j2 <=2.14.1 JNDI features used in configuration do not protect against attacker controlled LDAP and other JNDI related endpoints."},
+            {"lang": "es", "value": "Descripcion en espanol."},
+        ],
+        "metrics": {
+            "cvssMetricV31": [{
+                "source": "nvd@nist.gov",
+                "type": "Primary",
+                "cvssData": {
+                    "version": "3.1",
+                    "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+                    "baseScore": 10.0,
+                    "baseSeverity": "CRITICAL",
+                },
+            }],
+        },
+        "weaknesses": [
+            {
+                "source": "nvd@nist.gov",
+                "type": "Primary",
+                "description": [{"lang": "en", "value": "CWE-917"}],
+            },
+            {
+                "source": "other",
+                "type": "Secondary",
+                "description": [{"lang": "en", "value": "CWE-20"}, {"lang": "en", "value": "NVD-CWE-noinfo"}],
+            },
+        ],
+        "configurations": [{
+            "nodes": [{
+                "operator": "OR",
+                "negate": False,
+                "cpeMatch": [
+                    {
+                        "vulnerable": True,
+                        "criteria": "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*",
+                        "versionStartIncluding": "2.0",
+                        "versionEndExcluding": "2.15.0",
+                        "matchCriteriaId": "abc-123",
+                    },
+                    {
+                        "vulnerable": False,
+                        "criteria": "cpe:2.3:a:apache:log4j:2.15.0:*:*:*:*:*:*:*",
+                        "matchCriteriaId": "def-456",
+                    },
+                ],
+            }],
+        }],
+        "references": [
+            {"url": "https://logging.apache.org/log4j/2.x/security.html", "source": "security@apache.org", "tags": ["Vendor Advisory"]},
+            {"url": "https://github.com/advisories/GHSA-jfh8-c2jp-5v3q", "source": "nvd@nist.gov"},
+        ],
+        "cisaExploitAdd": "2021-12-10",
+        "cisaActionDue": "2021-12-24",
+    },
+}
+
 # --- sortable GHSA raw records for the /api/search sort-fix regression ------
 # The three orderings all differ so a wrong sort field is always detectable:
 #   published desc : A, C, B          updated desc : B, C, A

@@ -14,8 +14,9 @@ from unittest import mock
 
 from modules import cache
 from modules import ghsa_client as ghsa
+from modules import nvd_client
 from modules import search_service
-from samples import SORT_A, SORT_B, SORT_C, make_sortable_raw
+from samples import NVD_VULN, SAMPLE, SORT_A, SORT_B, SORT_C, make_sortable_raw
 
 
 class TestParseStrList(unittest.TestCase):
@@ -169,6 +170,73 @@ class TestRunSearch(unittest.TestCase):
         self.assertNotIn("ghsa", out.per_source)
         self.assertEqual(out.per_source.get("osv"), 0)
         self.assertEqual(out.results, [])
+
+
+class TestRunSearchNvd(unittest.TestCase):
+    """NVD source integration in run_search."""
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self._orig_db = cache.DB_PATH
+        cache.DB_PATH = self.tmp.name
+        cache.init_db(cache.DB_PATH)
+
+    def tearDown(self):
+        cache.DB_PATH = self._orig_db
+        for ext in ["", "-wal", "-shm"]:
+            try:
+                os.unlink(self.tmp.name + ext)
+            except OSError:
+                pass
+
+    def test_nvd_source_included(self):
+        nvd_normalized = nvd_client.normalize(NVD_VULN)
+        q = search_service.parse_search_query(
+            {"categories": ["bac"], "sources": ["nvd"]})
+        with mock.patch("modules.nvd_client.fetch_nvd",
+                        return_value=[nvd_normalized]):
+            out = search_service.run_search(q)
+        self.assertEqual(out.per_source, {"nvd": 1})
+        self.assertEqual(out.results[0]["cve_id"], "CVE-2021-44228")
+        self.assertEqual(out.results[0]["source"], "nvd")
+
+    def test_nvd_only_failure_is_502(self):
+        q = search_service.parse_search_query(
+            {"categories": ["bac"], "sources": ["nvd"]})
+        with mock.patch("modules.nvd_client.fetch_nvd",
+                        side_effect=nvd_client.NvdError("rate limited")):
+            with self.assertRaises(search_service.SearchError) as cm:
+                search_service.run_search(q)
+        self.assertEqual(cm.exception.status, 502)
+
+    def test_nvd_failure_with_ghsa_is_warning(self):
+        q = search_service.parse_search_query(
+            {"categories": ["bac"], "sources": ["ghsa", "nvd"]})
+        with mock.patch("modules.ghsa_client.fetch_advisories",
+                        return_value=make_sortable_raw()), \
+             mock.patch("modules.nvd_client.fetch_nvd",
+                        side_effect=nvd_client.NvdError("rate limited")):
+            out = search_service.run_search(q)
+        self.assertTrue(any("NVD fetch failed" in w for w in out.warnings))
+        self.assertEqual(out.per_source.get("ghsa"), 3)
+        self.assertNotIn("nvd", out.per_source)
+
+    def test_nvd_ghsa_dedupe_by_cve(self):
+        """Same CVE from GHSA and NVD should merge into one record."""
+        nvd_normalized = nvd_client.normalize(NVD_VULN)
+        ghsa_raw_rec = dict(SAMPLE, cve_id="CVE-2021-44228")
+        q = search_service.parse_search_query(
+            {"categories": ["bac"], "sources": ["ghsa", "nvd"]})
+        with mock.patch("modules.ghsa_client.fetch_advisories",
+                        return_value=[ghsa_raw_rec]), \
+             mock.patch("modules.nvd_client.fetch_nvd",
+                        return_value=[nvd_normalized]):
+            out = search_service.run_search(q)
+        cves = [r["cve_id"] for r in out.results]
+        self.assertEqual(cves.count("CVE-2021-44228"), 1)
+        self.assertIn("ghsa", out.results[0]["sources"])
+        self.assertIn("nvd", out.results[0]["sources"])
 
 
 if __name__ == "__main__":

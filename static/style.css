@@ -193,8 +193,12 @@ button.warn-btn:hover:not(:disabled) { border-color: var(--warn); background: rg
 .badge.eco { text-transform: uppercase; letter-spacing: .06em; color: var(--cyan); border-color: rgba(79,214,224,.35); background: rgba(79,214,224,.07); }
 .badge.src { font-weight: 800; letter-spacing: .04em; color: #0a0d14; border: none; background: #6b7796; }
 .badge.src-ghsa { background: #6ea8ff; }
+.badge.src-nvd { background: #f0b429; }
 .badge.src-osv { background: #45d483; }
 .badge.src-ghsa-osv { background: linear-gradient(90deg, #6ea8ff, #45d483); }
+.badge.src-ghsa-nvd { background: linear-gradient(90deg, #6ea8ff, #f0b429); }
+.badge.src-nvd-osv { background: linear-gradient(90deg, #f0b429, #45d483); }
+.badge.src-ghsa-nvd-osv { background: linear-gradient(90deg, #6ea8ff, #f0b429, #45d483); }
 .desc { color: var(--muted); font-size: 12.5px; margin: 8px 0 0; }
 .meta { color: var(--faint); font-size: 11.5px; display: flex; gap: 16px; flex-wrap: wrap; margin-top: 11px;
         padding-top: 11px; border-top: 1px solid var(--border); }

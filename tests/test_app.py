@@ -14,8 +14,9 @@ from unittest import mock
 from modules import ai_classifier
 from modules import cache
 from modules import ghsa_client as ghsa
+from modules import nvd_client
 from modules import osv_client
-from samples import OSV_GHSA, SAMPLE, SORT_A, SORT_B, SORT_C, make_sortable_raw
+from samples import NVD_VULN, OSV_GHSA, SAMPLE, SORT_A, SORT_B, SORT_C, make_sortable_raw
 
 
 class TestFlaskApp(unittest.TestCase):
@@ -157,6 +158,62 @@ class TestFlaskApp(unittest.TestCase):
         self.assertEqual(data["missing"], ["GHSA-not-in-cache"])
         self.assertIn(SAMPLE["ghsa_id"], data["verdicts"])
         self.assertNotIn("GHSA-not-in-cache", data["verdicts"])
+
+    # -------------------------------------------------------------- NVD source
+
+    def test_search_nvd_source(self):
+        nvd_normalized = nvd_client.normalize(NVD_VULN)
+        with mock.patch("modules.nvd_client.fetch_nvd",
+                        return_value=[nvd_normalized]):
+            r = self.client.post("/api/search",
+                                 json={"categories": ["bac"], "sources": ["nvd"]})
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(data["results"][0]["cve_id"], "CVE-2021-44228")
+        self.assertEqual(data["results"][0]["source"], "nvd")
+        self.assertEqual(data["query"]["per_source"], {"nvd": 1})
+
+    def test_search_nvd_and_ghsa_dedupe(self):
+        ghsa_raw = dict(SAMPLE, cve_id="CVE-2021-44228")
+        nvd_normalized = nvd_client.normalize(NVD_VULN)
+        with mock.patch("modules.ghsa_client.fetch_advisories",
+                        return_value=[ghsa_raw]), \
+             mock.patch("modules.nvd_client.fetch_nvd",
+                        return_value=[nvd_normalized]):
+            r = self.client.post("/api/search",
+                                 json={"categories": ["bac"],
+                                       "sources": ["ghsa", "nvd"]})
+        data = r.get_json()
+        self.assertEqual(data["count"], 1)
+        self.assertIn("ghsa", data["results"][0]["sources"])
+        self.assertIn("nvd", data["results"][0]["sources"])
+        self.assertEqual(data["results"][0]["source"], "ghsa")
+
+    def test_search_nvd_error_502_when_only_source(self):
+        with mock.patch("modules.nvd_client.fetch_nvd",
+                        side_effect=nvd_client.NvdError("rate limited")):
+            r = self.client.post("/api/search",
+                                 json={"categories": ["bac"], "sources": ["nvd"]})
+        self.assertEqual(r.status_code, 502)
+
+    def test_search_nvd_error_warning_with_other_sources(self):
+        with mock.patch("modules.ghsa_client.fetch_advisories",
+                        return_value=[SAMPLE]), \
+             mock.patch("modules.nvd_client.fetch_nvd",
+                        side_effect=nvd_client.NvdError("rate limited")):
+            r = self.client.post("/api/search",
+                                 json={"categories": ["bac"],
+                                       "sources": ["ghsa", "nvd"]})
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertTrue(any("NVD fetch failed" in w for w in data["warnings"]))
+        self.assertEqual(data["query"]["per_source"].get("ghsa"), 1)
+
+    def test_index_has_nvd_checkbox(self):
+        with mock.patch("modules.ghsa_client.gh_auth_ok", return_value=False):
+            r = self.client.get("/")
+        self.assertIn(b'value="nvd"', r.data)
 
     # ----------------------------------------------------------------- pages
 
