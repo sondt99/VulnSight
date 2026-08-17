@@ -33,12 +33,13 @@ import json
 import logging
 import os
 import random
+import threading
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .cwe_categories import CATEGORIES, cwe_label
 
@@ -74,12 +75,34 @@ class AIError(RuntimeError):
 class AIConfig:
     provider: str
     base_url: str
-    token: str
+    tokens: list[str]
     model: str
+    _current_idx: int = field(default=0, init=False, repr=False, compare=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False,
+                                  repr=False, compare=False)
 
     @property
     def configured(self) -> bool:
-        return bool(self.base_url and self.token and self.model)
+        return bool(self.base_url and self.tokens and self.model)
+
+    @property
+    def token(self) -> str:
+        """Current active token (thread-safe read)."""
+        if not self.tokens:
+            return ""
+        with self._lock:
+            return self.tokens[self._current_idx % len(self.tokens)]
+
+    def rotate_token(self) -> bool:
+        """Advance to the next token. Returns False if only one token exists."""
+        with self._lock:
+            if len(self.tokens) <= 1:
+                return False
+            prev = self._current_idx
+            self._current_idx = (self._current_idx + 1) % len(self.tokens)
+            logger.info("Rotated API key #%d → #%d  (%d keys total)",
+                        prev + 1, self._current_idx + 1, len(self.tokens))
+            return True
 
     @property
     def messages_url(self) -> str:
@@ -105,14 +128,19 @@ def load_config(provider: str | None = None) -> AIConfig:
 
     Each provider reads its own prefixed vars (ANTHROPIC_* / GLM_*) so both can
     live in .env at once; the generic AI_* names remain a fallback.
+
+    TOKEN may be a single key or a comma-separated list of keys.  When multiple
+    keys are present the runtime rotates to the next key on failure.
     """
     provider = (provider
                 or os.environ.get("CVE_AI_PROVIDER", "anthropic")).strip().lower()
+    raw_token = _env(provider, "TOKEN")
+    tokens = [t.strip() for t in raw_token.split(",") if t.strip()] if raw_token else []
     return AIConfig(
         provider=provider,
         base_url=_env(provider, "BASE_URL")
                  or _PROVIDER_DEFAULT_BASE_URL.get(provider, ""),
-        token=_env(provider, "TOKEN"),
+        tokens=tokens,
         model=_env(provider, "MODEL"),
     )
 
@@ -192,17 +220,20 @@ def _call_messages(cfg: AIConfig, system: str, user: str,
 def _call_messages_retrying(cfg: AIConfig, system: str, user: str,
                             max_tokens: int = 512, timeout: int = 45,
                             retries: int = MAX_RETRIES) -> str:
-    """_call_messages with exponential backoff on transient failures."""
+    """_call_messages with exponential backoff and key rotation on failure."""
+    max_attempts = max(retries + 1, len(cfg.tokens))
     last: AIError | None = None
-    for attempt in range(retries + 1):
+    for attempt in range(max_attempts):
         try:
             return _call_messages(cfg, system, user, max_tokens, timeout)
         except AIError as e:
             last = e
-            if not e.retryable or attempt == retries:
+            can_rotate = cfg.rotate_token()
+            if not can_rotate and not e.retryable:
                 raise
-            # exponential backoff with jitter so concurrent workers desync
-            delay = RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.6)
+            if attempt == max_attempts - 1:
+                raise
+            delay = RETRY_BASE_DELAY * (2 ** min(attempt, 3)) + random.uniform(0, 0.6)
             time.sleep(delay)
     assert last is not None
     raise last
@@ -225,7 +256,8 @@ def ping(cfg: AIConfig | None = None) -> dict:
             retries=1,
         )
         reply = out.strip() or "(reachable, empty text)"
-        return {"ok": True, "model": cfg.model, "reply": reply[:60]}
+        return {"ok": True, "model": cfg.model, "reply": reply[:60],
+                "keys": len(cfg.tokens)}
     except AIError as e:
         return {"ok": False, "error": str(e)}
 
@@ -317,24 +349,28 @@ def _parse_verdict(text: str) -> dict:
 
 def classify_one(cfg: AIConfig, adv: dict, category: str,
                  retries: int = MAX_RETRIES) -> dict:
-    """Classify one advisory, retrying the WHOLE call+parse on transient errors.
+    """Classify one advisory, retrying with key rotation on failure.
 
-    Retries cover both the network layer (rate limits, gateway errors) and the
-    parse layer (truncated / empty reasoning replies), because both clear up on
-    a fresh attempt.
+    On each failure the active API key is rotated so every key gets at least
+    one attempt.  Retries cover both the network layer (rate limits, gateway
+    errors) and the parse layer (truncated / empty reasoning replies).
     """
     system = _SYSTEM_PROMPT
     user = _build_user_prompt(adv, category)
+    max_attempts = max(retries + 1, len(cfg.tokens))
     last: AIError | None = None
-    for attempt in range(retries + 1):
+    for attempt in range(max_attempts):
         try:
             text = _call_messages(cfg, system, user, max_tokens=CLASSIFY_MAX_TOKENS)
             return _parse_verdict(text)
         except AIError as e:
             last = e
-            if not e.retryable or attempt == retries:
+            can_rotate = cfg.rotate_token()
+            if not can_rotate and not e.retryable:
                 raise
-            time.sleep(RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 0.6))
+            if attempt == max_attempts - 1:
+                raise
+            time.sleep(RETRY_BASE_DELAY * (2 ** min(attempt, 3)) + random.uniform(0, 0.6))
     assert last is not None
     raise last
 

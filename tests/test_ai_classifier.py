@@ -54,15 +54,31 @@ class TestAIParsing(unittest.TestCase):
 
 class TestConfig(unittest.TestCase):
     def test_config_detection(self):
-        cfg = ai_classifier.AIConfig("anthropic", "https://x", "tok", "PRO")
+        cfg = ai_classifier.AIConfig("anthropic", "https://x", ["tok"], "PRO")
         self.assertTrue(cfg.configured)
+        self.assertEqual(cfg.token, "tok")
         self.assertEqual(cfg.messages_url, "https://x/v1/messages")
-        self.assertFalse(ai_classifier.AIConfig("anthropic", "", "", "").configured)
+        self.assertFalse(ai_classifier.AIConfig("anthropic", "", [], "").configured)
+
+    def test_multi_key_rotation(self):
+        cfg = ai_classifier.AIConfig("glm", "https://x", ["k1", "k2", "k3"], "m")
+        self.assertEqual(cfg.token, "k1")
+        self.assertTrue(cfg.rotate_token())
+        self.assertEqual(cfg.token, "k2")
+        self.assertTrue(cfg.rotate_token())
+        self.assertEqual(cfg.token, "k3")
+        self.assertTrue(cfg.rotate_token())
+        self.assertEqual(cfg.token, "k1")  # wraps around
+
+    def test_single_key_no_rotation(self):
+        cfg = ai_classifier.AIConfig("glm", "https://x", ["only"], "m")
+        self.assertFalse(cfg.rotate_token())
+        self.assertEqual(cfg.token, "only")
 
 
 class TestClassify(unittest.TestCase):
     def _cfg(self):
-        return ai_classifier.AIConfig("anthropic", "https://x", "tok", "PRO")
+        return ai_classifier.AIConfig("anthropic", "https://x", ["tok"], "PRO")
 
     def test_classify_many_mocked(self):
         cfg = self._cfg()
@@ -137,6 +153,43 @@ class TestClassify(unittest.TestCase):
         with mock.patch("modules.ai_classifier._call_messages", side_effect=boom):
             res = ai_classifier.classify_many(cfg, advs, "bac")
         self.assertIn("error", res["A"])
+
+    def test_multi_key_rotates_on_failure(self):
+        """When a key fails, the next key is tried; succeeds on key #3."""
+        cfg = ai_classifier.AIConfig("glm", "https://x",
+                                     ["bad1", "bad2", "good3"], "m")
+        adv = ghsa.normalize(SAMPLE)
+        calls = []
+
+        def by_key(cfg, system, user, max_tokens=512, timeout=45):
+            key = cfg.token
+            calls.append(key)
+            if key.startswith("bad"):
+                raise ai_classifier.AIError("429", status=429, retryable=True)
+            return '{"is_match": true, "confidence": 0.9, "vuln_type": "t", "reason": "r"}'
+
+        with mock.patch("modules.ai_classifier._call_messages", side_effect=by_key), \
+             mock.patch("modules.ai_classifier.time.sleep", lambda *_: None):
+            v = ai_classifier.classify_one(cfg, adv, "bac")
+        self.assertTrue(v["is_match"])
+        self.assertEqual(calls[-1], "good3")
+
+    def test_all_keys_exhausted_raises(self):
+        """When every key fails, the error propagates after trying them all."""
+        cfg = ai_classifier.AIConfig("glm", "https://x",
+                                     ["k1", "k2", "k3"], "m")
+        adv = ghsa.normalize(SAMPLE)
+        calls = {"n": 0}
+
+        def always_fail(cfg, system, user, max_tokens=512, timeout=45):
+            calls["n"] += 1
+            raise ai_classifier.AIError("503", status=503, retryable=True)
+
+        with mock.patch("modules.ai_classifier._call_messages", side_effect=always_fail), \
+             mock.patch("modules.ai_classifier.time.sleep", lambda *_: None):
+            with self.assertRaises(ai_classifier.AIError):
+                ai_classifier.classify_one(cfg, adv, "bac")
+        self.assertGreaterEqual(calls["n"], 3)
 
     def test_classify_many_unexpected_exception_isolated(self):
         # Regression: a non-AIError bug used to escape fut.result() and kill
