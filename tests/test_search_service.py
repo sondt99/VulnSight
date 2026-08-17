@@ -23,8 +23,9 @@ class TestParseStrList(unittest.TestCase):
     def test_comma_string(self):
         self.assertEqual(search_service.parse_str_list("a, b,,c"), ["a", "b", "c"])
 
-    def test_list_coerced_to_str(self):
-        self.assertEqual(search_service.parse_str_list(["x", 1]), ["x", "1"])
+    def test_list_entries_must_be_strings(self):
+        with self.assertRaises(search_service.SearchError):
+            search_service.parse_str_list(["x", 1])
 
     def test_none_and_empty(self):
         self.assertEqual(search_service.parse_str_list(None), [])
@@ -64,14 +65,67 @@ class TestParseSearchQuery(unittest.TestCase):
         self.assertIn("639", q.cwes)              # genuinely new -> appended
         self.assertNotIn("89", q.cwes)            # sqli not requested
 
-    def test_unknown_category_without_extras_is_400(self):
-        with self.assertRaises(search_service.SearchError) as cm:
-            search_service.parse_search_query({"categories": ["nope"]})
-        self.assertEqual(cm.exception.status, 400)
-        # ... but extra CWEs alone can still make the query resolvable.
+    def test_unknown_category_is_400_even_with_extra_cwes(self):
+        for body in (
+            {"categories": ["nope"]},
+            {"categories": ["nope"], "extra_cwes": "CWE-79"},
+        ):
+            with self.subTest(body=body), self.assertRaises(search_service.SearchError) as cm:
+                search_service.parse_search_query(body)
+            self.assertEqual(cm.exception.status, 400)
+
+    def test_extra_cwes_are_bounded_and_strictly_typed(self):
+        invalid_values = (
+            ["9" * (search_service.MAX_CWE_ID_DIGITS + 1)],
+            ["CWE-0"],
+            [{"id": "79"}],
+            list(range(1, search_service.MAX_EXTRA_CWES + 2)),
+        )
+        for extra_cwes in invalid_values:
+            with self.subTest(extra_cwes=type(extra_cwes[0]).__name__), \
+                    self.assertRaises(search_service.SearchError):
+                search_service.parse_search_query({"extra_cwes": extra_cwes})
+
+    def test_extra_cwes_are_canonicalized_and_deduplicated(self):
         q = search_service.parse_search_query(
-            {"categories": ["nope"], "extra_cwes": "CWE-79"})
-        self.assertEqual(q.cwes, ["79"])
+            {
+                "categories": ["sqli"],
+                "include_extended": False,
+                "extra_cwes": ["CWE-00079", 79, "639"],
+            }
+        )
+        self.assertEqual(q.cwes, ["89", "79", "639"])
+
+    def test_string_list_fields_are_bounded_and_strictly_typed(self):
+        invalid_bodies = (
+            {"categories": [{"name": "bac"}]},
+            {"categories": ["b" * 65]},
+            {"sources": ["ghsa", "nvd", "osv", "osv-native", "ghsa"]},
+            {"sources": [{"name": "ghsa"}]},
+        )
+        for body in invalid_bodies:
+            with self.subTest(body=body), self.assertRaises(search_service.SearchError):
+                search_service.parse_search_query(body)
+
+    def test_sources_are_deduplicated(self):
+        q = search_service.parse_search_query({"sources": ["ghsa", "ghsa"]})
+        self.assertEqual(q.sources, ["ghsa"])
+
+    def test_string_false_is_not_truthy(self):
+        q = search_service.parse_search_query({"include_extended": "false"})
+        self.assertFalse(q.include_extended)
+
+    def test_invalid_source_and_date_rejected(self):
+        with self.assertRaises(search_service.SearchError):
+            search_service.parse_search_query({"sources": ["made-up"]})
+        with self.assertRaises(search_service.SearchError):
+            search_service.parse_search_query({"published": "last Tuesday"})
+        with self.assertRaises(search_service.SearchError):
+            search_service.parse_search_query({"published": "2026-02-30"})
+        with self.assertRaises(search_service.SearchError):
+            search_service.parse_search_query({"ecosystem": {"unexpected": True}})
+        with self.assertRaises(search_service.SearchError):
+            search_service.parse_search_query({"extra_cwes": ["CWE-not-a-number"]})
 
 
 class TestMergeAdvisories(unittest.TestCase):
@@ -102,6 +156,38 @@ class TestMergeAdvisories(unittest.TestCase):
         self.assertEqual([r["summary"] for r in out], ["x", "no ids at all", "y"])
         self.assertEqual(out[0]["sources"], ["ghsa", "osv"])
         self.assertEqual(out[1]["sources"], ["?"])  # fallback source tag
+
+    def test_merge_preserves_complementary_metadata(self):
+        nvd = {
+            "ghsa_id": "CVE-2026-55", "cve_id": "CVE-2026-55", "source": "nvd",
+            "severity": "critical", "cvss_score": 9.8, "cwes": ["89"],
+            "references": ["https://nvd.example"], "packages": [], "ecosystems": [],
+            "kev": True, "nvd_status": "Analyzed",
+        }
+        ghsa = {
+            "ghsa_id": "GHSA-bridge", "cve_id": "CVE-2026-55", "source": "ghsa",
+            "severity": "high", "cvss_score": 8.1, "cwes": ["CWE-89"],
+            "references": ["https://ghsa.example"], "packages": [], "ecosystems": [],
+        }
+        merged = search_service.merge_advisories([nvd, ghsa])[0]
+        self.assertEqual(merged["source"], "ghsa")
+        self.assertTrue(merged["kev"])
+        self.assertEqual(merged["nvd_status"], "Analyzed")
+        self.assertEqual(merged["severity"], "critical")
+        self.assertEqual(merged["cvss_by_source"], {"nvd": 9.8, "ghsa": 8.1})
+        self.assertEqual(set(merged["references"]), {"https://nvd.example", "https://ghsa.example"})
+        self.assertEqual(set(merged["source_records"]), {"ghsa", "nvd"})
+
+    def test_alias_graph_bridge_merges_all_records(self):
+        records = [
+            {"ghsa_id": "GHSA-one", "aliases": ["CVE-2026-77"], "source": "ghsa"},
+            {"osv_id": "GO-2026-1", "ghsa_id": "GO-2026-1",
+             "aliases": ["CVE-2026-77", "RUSTSEC-2026-1"], "source": "osv"},
+            {"osv_id": "RUSTSEC-2026-1", "ghsa_id": "RUSTSEC-2026-1", "source": "osv"},
+        ]
+        merged = search_service.merge_advisories(records)
+        self.assertEqual(len(merged), 1)
+        self.assertIn("RUSTSEC-2026-1", merged[0]["aliases"])
 
 
 class TestRunSearch(unittest.TestCase):
@@ -150,6 +236,14 @@ class TestRunSearch(unittest.TestCase):
         out = self._run({"sort": "cve_id", "direction": "asc"})
         self.assertEqual([r["ghsa_id"] for r in out.results],
                          [SORT_C, SORT_A, SORT_B])
+
+    def test_common_filters_are_enforced_after_normalization(self):
+        q = search_service.parse_search_query({"published": ">=2099-01-01"})
+        with mock.patch(
+            "modules.ghsa_client.fetch_advisories", return_value=make_sortable_raw()
+        ):
+            out = search_service.run_search(q)
+        self.assertEqual(out.results, [])
 
     def test_ghsa_only_failure_is_502(self):
         q = search_service.parse_search_query({})  # sources == ["ghsa"]

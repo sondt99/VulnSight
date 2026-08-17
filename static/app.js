@@ -3,6 +3,24 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
     const $$ = (s) => Array.from(document.querySelectorAll(s));
     let LAST = [];           // last result set (normalized advisories)
     let AI = {};             // ghsa_id -> verdict
+    let filterReturnFocus = null;
+
+    function setResultsBusy(busy) {
+      $('#results').setAttribute('aria-busy', String(Boolean(busy)));
+    }
+
+    function setFilterPanel(open, restoreFocus = true) {
+      const isOpen = Boolean(open);
+      if (isOpen) filterReturnFocus = document.activeElement;
+      document.body.classList.toggle('filters-open', isOpen);
+      $('#filters-toggle').setAttribute('aria-expanded', String(isOpen));
+      $('#filter-scrim').tabIndex = isOpen ? 0 : -1;
+      if (isOpen) {
+        requestAnimationFrame(() => $('#filters-close').focus());
+      } else if (restoreFocus && filterReturnFocus && document.contains(filterReturnFocus)) {
+        filterReturnFocus.focus();
+      }
+    }
 
 
     function selectedCategories() {
@@ -55,12 +73,23 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       const t = document.createElement('div');
       t.className = 'toast ' + kind;
       t.textContent = msg;
+      t.setAttribute('role', kind === 'err' ? 'alert' : 'status');
+      t.setAttribute('aria-live', kind === 'err' ? 'assertive' : 'polite');
       document.body.appendChild(t);
       setTimeout(() => t.remove(), 5000);
     }
 
     function esc(s) {
-      return (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+      return String(s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    }
+
+    function safeUrl(value) {
+      try {
+        const url = new URL(String(value || ''), window.location.origin);
+        return ['http:', 'https:'].includes(url.protocol) ? esc(url.href) : '#';
+      } catch (_) {
+        return '#';
+      }
     }
 
     function severityRank(s) {
@@ -72,15 +101,22 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       let aiHtml = '';
       if (v) {
         if (v.error) {
-          aiHtml = `<div class="ai-verdict"><div class="head">⚠️ AI error</div><div class="desc">${esc(v.error)}</div></div>`;
+          aiHtml = `<div class="ai-verdict error">
+            <div class="verdict-head"><span class="verdict-state">AI error</span></div>
+            <div class="desc">${esc(v.error)}</div>
+          </div>`;
         } else {
-          const cls = v.is_match ? 'match' : 'nomatch';
-          const icon = v.is_match ? '✅ Match' : '❌ Not a match';
+          const incomplete = v.has_errors && v.is_match !== true;
+          const cls = v.is_match ? 'match' : (incomplete ? '' : 'nomatch');
+          const state = v.is_match ? 'Confirmed match' : (incomplete ? 'Incomplete score' : 'Not a match');
           const pct = Math.round((v.confidence||0)*100);
           aiHtml = `<div class="ai-verdict ${cls}">
-            <div class="head">${icon} ${v.vuln_type ? '· <span style="color:var(--accent2)">'+esc(v.vuln_type)+'</span>' : ''}
-              <span style="margin-left:auto;color:var(--muted);font-weight:600">${pct}%${v.cached?' · cached':''}</span></div>
-            <div class="conf-bar"><div class="conf-fill" data-pct="${pct}"></div></div>
+            <div class="verdict-head">
+              <span class="verdict-state">${state}</span>
+              ${v.vuln_type ? '<span class="verdict-type">/ '+esc(v.vuln_type)+'</span>' : ''}
+              <span class="verdict-score">${pct}%${v.cached?' · CACHED':''}${v.has_errors?' · PARTIAL':''}</span>
+            </div>
+            <progress class="conf-bar" max="100" value="${pct}" aria-label="AI confidence ${pct}%">${pct}%</progress>
             <div class="desc">${esc(v.reason||'')}</div>
           </div>`;
         }
@@ -90,33 +126,39 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       const pkgs = (a.packages||[]).slice(0,4).map(p =>
         `<span class="badge pkg">${esc(p.ecosystem)}:${esc(p.name)}${p.first_patched_version?' → '+esc(p.first_patched_version):''}</span>`).join('');
       const morePkgs = (a.packages||[]).length > 4 ? `<span class="badge">+${a.packages.length-4} more</span>` : '';
-      const cve = a.cve_id ? `<a href="https://nvd.nist.gov/vuln/detail/${esc(a.cve_id)}" target="_blank">${esc(a.cve_id)}</a>` : '<span class="muted">no CVE</span>';
+      const cve = a.cve_id ? `<a href="https://nvd.nist.gov/vuln/detail/${encodeURIComponent(a.cve_id)}" target="_blank" rel="noopener noreferrer">${esc(a.cve_id)}</a>` : '<span class="muted">no CVE</span>';
       const dimClass = ($('#only_match').checked && v && v.is_match === false) ? 'dim' : '';
-      const sevbar = 'sevbar-' + (a.severity || 'unknown');
+      const safeSeverity = ['critical','high','medium','low','unknown'].includes(a.severity) ? a.severity : 'unknown';
+      const sevbar = 'sevbar-' + safeSeverity;
       const srcs = a.sources || [a.source].filter(Boolean);
+      const sourceClass = srcs.map(s => String(s).toLowerCase().replace(/[^a-z0-9-]/g, '')).filter(Boolean).join('-');
       const srcBadge = srcs.length
-        ? `<span class="badge src src-${srcs.join('-')}" title="Data source(s)">${srcs.map(s=>s.toUpperCase()).join('+')}</span>` : '';
+        ? `<span class="badge src src-${sourceClass}" title="Data source(s)">${srcs.map(s=>esc(String(s).toUpperCase())).join('+')}</span>` : '';
       const nativeBadge = (a.native && !(a.cwes||[]).length)
-        ? `<span class="badge" style="border-color:var(--warn);color:var(--warn)" title="Native OSV record with no CWE — relies on AI">no CWE · AI</span>` : '';
-      return `<div class="card ${sevbar} ${dimClass}" data-id="${esc(a.ghsa_id)}">
+        ? `<span class="badge badge--native" title="Native OSV record with no CWE — relies on AI">NO CWE · AI</span>` : '';
+      const withdrawnBadge = a.withdrawn_at
+        ? `<span class="badge badge--withdrawn" title="Withdrawn at ${esc(a.withdrawn_at)}">WITHDRAWN</span>` : '';
+      const kevBadge = a.kev
+        ? `<span class="badge badge--kev" title="CISA Known Exploited Vulnerability">KEV / EXPLOITED</span>` : '';
+      return `<article class="card ${sevbar} ${dimClass}" data-id="${esc(a.ghsa_id)}">
         <div class="card-top">
-          <div class="title">${esc(a.summary)}</div>
-          <span class="badge sev ${a.severity}">${esc(a.severity)}</span>
+          <h3 class="title">${esc(a.summary)}</h3>
+          <span class="badge sev ${safeSeverity}">${esc(a.severity)}</span>
         </div>
         <div class="badges">
-          ${srcBadge}${nativeBadge}
-          <span class="badge eco">${(a.ecosystems||[]).join(', ')||'—'}</span>
+          ${srcBadge}${nativeBadge}${kevBadge}${withdrawnBadge}
+          <span class="badge eco">${esc((a.ecosystems||[]).join(', ')||'—')}</span>
           ${cwes}
         </div>
         <div class="badges">${pkgs}${morePkgs}</div>
         <div class="meta">
-          <span><a href="${esc(a.html_url)}" target="_blank">${esc(a.ghsa_id)}</a></span>
-          <span>${cve}</span>
-          <span>📅 ${esc((a.published_at||'').slice(0,10))}</span>
-          ${a.cvss_score ? '<span>CVSS '+a.cvss_score+'</span>' : ''}
+          <span><span class="meta-label">Advisory</span><a href="${safeUrl(a.html_url)}" target="_blank" rel="noopener noreferrer">${esc(a.ghsa_id)}</a></span>
+          <span><span class="meta-label">CVE</span>${cve}</span>
+          <span><span class="meta-label">Published</span><time datetime="${esc((a.published_at||'').slice(0,10))}">${esc((a.published_at||'').slice(0,10))}</time></span>
+          ${a.cvss_score ? '<span><span class="meta-label">CVSS</span>'+esc(a.cvss_score)+'</span>' : ''}
         </div>
         ${aiHtml}
-      </div>`;
+      </article>`;
     }
 
     // The set currently on screen: filtered by "only matches", then sorted.
@@ -142,15 +184,16 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
     }
 
     function failedIds() {
-      return LAST.map(a => a.ghsa_id).filter(id => AI[id] && AI[id].error);
+      return LAST.map(a => a.ghsa_id).filter(id => AI[id] && (AI[id].error || AI[id].has_errors));
     }
 
     function updateActionButtons() {
       const has = LAST.length > 0;
       $('#ai-btn').disabled = !has;
       $('#only_match').disabled = !has;
-      $('#export-btn').style.opacity = has ? '1' : '.4';
-      $('#export-btn').style.pointerEvents = has ? 'auto' : 'none';
+      $('#export-btn').setAttribute('aria-disabled', String(!has));
+      $('#export-btn').tabIndex = has ? 0 : -1;
+      if (!has) $('.export-menu').removeAttribute('open');
       const nfail = failedIds().length;
       const rb = $('#retry-btn');
       rb.disabled = nfail === 0;
@@ -166,21 +209,29 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
         return;
       }
       el.innerHTML = items.map(renderCard).join('');
-      // Animate confidence bars from 0 -> target after paint.
-      requestAnimationFrame(() => {
-        $$('.conf-fill').forEach(f => { f.style.width = (f.dataset.pct || 0) + '%'; });
-      });
       updateActionButtons();
     }
 
     async function search() {
       const cats = selectedCategories();
       if (!cats.length) { toast('Select at least one bug class', 'err'); return; }
+      if (document.body.classList.contains('filters-open')) setFilterPanel(false, false);
       $('#search-btn').disabled = true;
-      $('#results').innerHTML = `<div class="loading"><span class="spinner"></span>Fetching advisories from GitHub…</div>`;
+      setResultsBusy(true);
+      $('#results').innerHTML = `<div class="loading"><span class="spinner"></span>Opening intelligence sources…</div>`;
       $('#summary').textContent = 'Searching…';
       const sources = $$('input[name=source]:checked').map(c => c.value);
-      if (!sources.length) { toast('Select at least one data source', 'err'); $('#search-btn').disabled = false; return; }
+      if (!sources.length) {
+        toast('Select at least one data source', 'err');
+        $('#search-btn').disabled = false;
+        setResultsBusy(false);
+        return;
+      }
+      // A failed query must never leave the previous result set available to
+      // the Auto pipeline or export controls as if it were fresh data.
+      LAST = [];
+      AI = {};
+      updateActionButtons();
       const payload = {
         categories: cats,
         include_extended: $('#include_extended').checked,
@@ -212,7 +263,7 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
         const ps = data.query.per_source || {};
         const psText = Object.keys(ps).length ? ' · ' + Object.entries(ps).map(([k,v]) => `${k.toUpperCase()}:${v}`).join(' + ') : '';
         $('#summary').innerHTML = `<b>${data.count}</b> advisories${psText} · CWEs: <code>${data.query.cwes.join(', ')}</code>`
-          + (cached ? ` · <span style="color:var(--accent2)">${cached} already AI-scored</span>` : '');
+          + (cached ? ` · <span class="summary-cached">${cached} already AI-scored</span>` : '');
         (data.warnings || []).forEach(w => toast('⚠️ ' + w, 'err'));
         $('#ai-btn').disabled = LAST.length === 0;
         $('#only_match').disabled = LAST.length === 0;
@@ -224,6 +275,7 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
         toast(e.message, 'err');
       } finally {
         $('#search-btn').disabled = false;
+        setResultsBusy(false);
       }
     }
 
@@ -232,12 +284,15 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
     async function classifyIds(ids) {
       if (!ids.length) return 0;
       const cats = selectedCategories();
-      const r = await fetch('/api/ai/classify', {method:'POST', headers:{'content-type':'application/json'},
-        body: JSON.stringify({category: cats[0] || 'bac', ghsa_ids: ids})});
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error || 'AI failed');
-      Object.assign(AI, data.verdicts);
-      return Object.values(data.verdicts).filter(v => v.error).length;
+      for (let offset = 0; offset < ids.length; offset += 100) {
+        const batch = ids.slice(offset, offset + 100);
+        const r = await fetch('/api/ai/classify', {method:'POST', headers:{'content-type':'application/json'},
+          body: JSON.stringify({categories: cats.length ? cats : ['bac'], ghsa_ids: batch})});
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || 'AI failed');
+        Object.assign(AI, data.verdicts);
+      }
+      return ids.filter(id => AI[id] && (AI[id].error || AI[id].has_errors)).length;
     }
 
     async function refineAI() {
@@ -245,7 +300,8 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       const ids = LAST.map(a => a.ghsa_id);
       $('#ai-btn').disabled = true;
       $('#retry-btn').disabled = true;
-      const orig = $('#ai-btn').textContent;
+      setResultsBusy(true);
+      const orig = $('#ai-btn').innerHTML;
       $('#ai-btn').innerHTML = '<span class="spinner"></span>Refining…';
       try {
         await classifyIds(ids);
@@ -268,7 +324,8 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       } catch (e) {
         toast(e.message, 'err');
       } finally {
-        $('#ai-btn').textContent = orig;
+        $('#ai-btn').innerHTML = orig;
+        setResultsBusy(false);
         render();
       }
     }
@@ -277,7 +334,8 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       const fails = failedIds();
       if (!fails.length) return;
       $('#retry-btn').disabled = true;
-      const orig = $('#retry-btn').textContent;
+      setResultsBusy(true);
+      const orig = $('#retry-btn').innerHTML;
       $('#retry-btn').innerHTML = '<span class="spinner"></span>Retrying…';
       try {
         await classifyIds(fails);
@@ -287,7 +345,8 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       } catch (e) {
         toast(e.message, 'err');
       } finally {
-        $('#retry-btn').textContent = orig;
+        $('#retry-btn').innerHTML = orig;
+        setResultsBusy(false);
         render();
       }
     }
@@ -296,7 +355,11 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       const pill = $('#ai-test-pill');
       pill.textContent = '⚡ testing…';
       try {
-        const r = await fetch('/api/ai/test');
+        const r = await fetch('/api/ai/test', {
+          method: 'POST',
+          headers: {'content-type': 'application/json'},
+          body: '{}',
+        });
         const d = await r.json();
         if (d.ok) { pill.textContent = '⚡ AI OK'; toast('AI reachable ('+d.model+'): '+d.reply, 'ok'); }
         else { pill.textContent = '⚡ AI fail'; toast('AI test failed: '+d.error, 'err'); }
@@ -305,7 +368,13 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
 
     // Any advisory in the current set that the AI has NOT scored yet.
     function unscoredCount() {
-      return LAST.filter(a => !(AI[a.ghsa_id] || a.ai)).length;
+      const cats = selectedCategories();
+      return LAST.filter(a => {
+        const verdict = AI[a.ghsa_id] || a.ai;
+        if (!verdict) return true;
+        const scored = verdict.scored_categories || [];
+        return cats.some(category => !scored.includes(category));
+      }).length;
     }
 
     // --- Export -------------------------------------------------------------
@@ -320,11 +389,17 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
         ecosystems: (a.ecosystems || []).join('|'),
         packages: (a.packages || []).map(p => `${p.ecosystem}:${p.name}${p.first_patched_version?'@'+p.first_patched_version:''}`).join('|'),
         cwes: (a.cwes || []).join('|'),
+        kev: a.kev === true ? 'yes' : 'no',
+        nvd_status: a.nvd_status || '',
+        severity_by_source: JSON.stringify(a.severity_by_source || {}),
+        cvss_by_source: JSON.stringify(a.cvss_by_source || {}),
         ai_match: v.error ? 'ERROR' : (v.is_match === true ? 'yes' : (v.is_match === false ? 'no' : '')),
         ai_confidence: v.confidence != null ? v.confidence : '',
         ai_vuln_type: v.vuln_type || '',
         ai_reason: v.error ? v.error : (v.reason || ''),
         published: (a.published_at || '').slice(0, 10),
+        updated: (a.updated_at || '').slice(0, 10),
+        withdrawn_at: a.withdrawn_at || '',
         url: a.html_url || '',
         summary: a.summary || '',
       };
@@ -339,8 +414,13 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
     }
     function stamp() { return new Date().toISOString().slice(0,19).replace(/[:T]/g,'-'); }
     function csvCell(v) {
-      const s = String(v == null ? '' : v);
-      return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+      const text = String(v == null ? '' : v);
+      // Spreadsheet applications may execute attacker-controlled advisory text
+      // as a formula. A leading apostrophe forces the cell to remain plain text.
+      const safe = /^[\t\r\n]/.test(text) || /^[ ]*[=+\-@]/.test(text)
+        ? "'" + text
+        : text;
+      return /[",\r\n]/.test(safe) ? '"' + safe.replace(/"/g, '""') + '"' : safe;
     }
     function doExport(fmt) {
       let items = currentItems();
@@ -348,11 +428,12 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       if (!items.length) { toast('Nothing to export', 'err'); return; }
       const rows = items.map(flatRow);
       if (fmt === 'json') {
-        download(`ghsa-advisories-${stamp()}.json`, JSON.stringify(rows, null, 2), 'application/json');
+        const full = items.map(a => ({...a, ai: AI[a.ghsa_id] || a.ai || null}));
+        download(`vulnerability-advisories-${stamp()}.json`, JSON.stringify(full, null, 2), 'application/json');
       } else {
         const cols = Object.keys(rows[0]);
         const csv = [cols.join(',')].concat(rows.map(r => cols.map(c => csvCell(r[c])).join(','))).join('\n');
-        download(`ghsa-advisories-${stamp()}.csv`, '﻿' + csv, 'text/csv;charset=utf-8');
+        download(`vulnerability-advisories-${stamp()}.csv`, '﻿' + csv, 'text/csv;charset=utf-8');
       }
       $('.export-menu').removeAttribute('open');
       toast(`Exported ${items.length} advisory(ies) as ${fmt.startsWith('csv')?'CSV':'JSON'}`, 'ok');
@@ -364,6 +445,7 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
 
     // One-click pipeline: optimal sources -> search -> AI (+retry) -> only matches.
     async function autoRun() {
+      if ($('#auto-btn').disabled) return;
       const cats = selectedCategories();
       if (!cats.length) { toast('Select at least one bug class', 'err'); return; }
       const eco = $('#ecosystem').value;
@@ -374,7 +456,7 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
 
       const btn = $('#auto-btn');
       btn.disabled = true;
-      const orig = btn.textContent;
+      const orig = btn.innerHTML;
       try {
         btn.innerHTML = '<span class="spinner"></span>1/3 Searching…';
         await search();
@@ -391,7 +473,7 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
         render();
       } finally {
         btn.disabled = false;
-        btn.textContent = orig;
+        btn.innerHTML = orig;
       }
     }
 
@@ -409,6 +491,9 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
     });
     $('#retry-btn').addEventListener('click', retryFailed);
     $('#ai-test-pill').addEventListener('click', testAI);
+    $('#filters-toggle').addEventListener('click', () => setFilterPanel(true));
+    $('#filters-close').addEventListener('click', () => setFilterPanel(false));
+    $('#filter-scrim').addEventListener('click', () => setFilterPanel(false));
     $('#ecosystem').addEventListener('change', refreshPackages);
     $('#scenario').addEventListener('change', e => applyScenario(e.target.value));
     $$('input[name=extra_cwe]').forEach(c => c.addEventListener('change', updateExtraCount));
@@ -418,7 +503,22 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       const m = $('.export-menu');
       if (m && m.open && !m.contains(e.target)) m.removeAttribute('open');
     });
-    document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName === 'SELECT') autoRun(); });
+    $('#export-btn').addEventListener('click', e => {
+      if (e.currentTarget.getAttribute('aria-disabled') === 'true') e.preventDefault();
+    });
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && document.body.classList.contains('filters-open')) {
+        setFilterPanel(false);
+      } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        autoRun();
+      }
+    });
+    window.addEventListener('resize', () => {
+      if (window.innerWidth > 900 && document.body.classList.contains('filters-open')) {
+        setFilterPanel(false, false);
+      }
+    });
 
     // Initial population.
     refreshPackages();

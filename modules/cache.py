@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS ai_classification (
     vuln_type   TEXT,
     reason      TEXT,
     model       TEXT,
+    fingerprint TEXT,
     created_at  REAL NOT NULL,
     PRIMARY KEY (ghsa_id, category)
 );
@@ -71,6 +72,11 @@ def _db(path: str | None = None):
 def init_db(path: str | None = None) -> None:
     with _db(path) as conn:
         conn.executescript(_SCHEMA)
+        columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(ai_classification)")
+        }
+        if "fingerprint" not in columns:
+            conn.execute("ALTER TABLE ai_classification ADD COLUMN fingerprint TEXT")
 
 
 # ---------------------------------------------------------------------------
@@ -127,18 +133,22 @@ def save_classification(
     verdict: dict,
     model: str,
     path: str | None = None,
+    *,
+    fingerprint: str | None = None,
 ) -> None:
     with _db(path) as conn:
         conn.execute(
             """INSERT INTO ai_classification
-               (ghsa_id, category, is_match, confidence, vuln_type, reason, model, created_at)
-               VALUES (?,?,?,?,?,?,?,?)
+               (ghsa_id, category, is_match, confidence, vuln_type, reason, model,
+                fingerprint, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?)
                ON CONFLICT(ghsa_id, category) DO UPDATE SET
                  is_match=excluded.is_match,
                  confidence=excluded.confidence,
                  vuln_type=excluded.vuln_type,
                  reason=excluded.reason,
                  model=excluded.model,
+                 fingerprint=excluded.fingerprint,
                  created_at=excluded.created_at""",
             (
                 ghsa_id,
@@ -148,13 +158,18 @@ def save_classification(
                 verdict.get("vuln_type"),
                 verdict.get("reason"),
                 model,
+                fingerprint,
                 time.time(),
             ),
         )
 
 
 def get_classifications(
-    ghsa_ids: list[str], category: str, path: str | None = None
+    ghsa_ids: list[str],
+    category: str,
+    path: str | None = None,
+    *,
+    expected_fingerprints: dict[str, str] | None = None,
 ) -> dict[str, dict]:
     if not ghsa_ids:
         return {}
@@ -167,6 +182,10 @@ def get_classifications(
         ).fetchall()
     out: dict[str, dict] = {}
     for r in rows:
+        if expected_fingerprints is not None:
+            expected = expected_fingerprints.get(r["ghsa_id"])
+            if not expected or r["fingerprint"] != expected:
+                continue
         out[r["ghsa_id"]] = {
             "is_match": bool(r["is_match"]),
             "confidence": r["confidence"],

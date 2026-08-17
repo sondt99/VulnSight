@@ -27,14 +27,17 @@ pass** is for: it reads each advisory and returns a structured verdict
 
 ## Features
 
-- **Bug-class → CWE filtering** across GHSA + OSV.dev, merged and de-duplicated.
+- **Bug-class → CWE filtering** across GHSA + NVD + OSV.dev, merged through
+  the full CVE/GHSA/OSV alias graph without discarding source metadata.
 - **Scope by** ecosystem (Maven/Go/npm/pip/…), package, severity, publish date.
-- **AI refinement** — confirm true matches and surface source-native records
+- **AI refinement** — confirm true matches across every selected bug class and surface source-native records
   (`GO-`, `RUSTSEC-`, `PYSEC-`) that carry no CWE tag at all.
+- **Consistent filters** — publish date, package and severity are enforced on
+  normalized records from every source; long NVD date ranges are split safely.
 - **SQLite cache** — advisories and AI verdicts persist, so repeat searches are
   fast and never re-spend AI tokens on an advisory already classified.
 - **Export** the filtered list as CSV or JSON.
-- **Offline test suite** — 79 unit tests, no network or credentials required.
+- **Offline test suite** — 120+ unit tests, no network or credentials required.
 
 ## Quick start
 

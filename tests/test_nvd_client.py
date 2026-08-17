@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import json
 import unittest
+from datetime import datetime, timezone
 from unittest import mock
 
 from modules import nvd_client
@@ -75,9 +76,22 @@ class TestDateParams(unittest.TestCase):
         self.assertIn("pubStartDate", params)
         self.assertIn("pubEndDate", params)
 
-    def test_old_date_clamped_to_120_days(self):
-        params = nvd_client._build_date_params(">=2020-01-01")
-        self.assertIn("pubStartDate", params)
+    def test_old_date_is_split_without_losing_requested_start(self):
+        now = datetime(2026, 8, 17, tzinfo=timezone.utc)
+        windows = nvd_client._build_date_windows(">=2020-01-01", now=now)
+        self.assertGreater(len(windows), 1)
+        self.assertTrue(windows[0]["pubEndDate"].startswith("2026-08-17"))
+        self.assertTrue(windows[-1]["pubStartDate"].startswith("2020-01-01"))
+        for window in windows:
+            start = datetime.fromisoformat(window["pubStartDate"].replace("Z", "+00:00"))
+            end = datetime.fromisoformat(window["pubEndDate"].replace("Z", "+00:00"))
+            self.assertLessEqual((end - start).total_seconds(), 120 * 86400)
+
+    def test_year_one_is_clamped_without_datetime_underflow(self):
+        now = datetime(2026, 8, 17, tzinfo=timezone.utc)
+        windows = nvd_client._build_date_windows(">=0001-01-01", now=now)
+        self.assertGreater(len(windows), 1)
+        self.assertTrue(windows[-1]["pubStartDate"].startswith("1988-01-01"))
 
 
 class TestFetchNvd(unittest.TestCase):
@@ -119,6 +133,13 @@ class TestFetchNvd(unittest.TestCase):
     def test_empty_cwes_returns_empty(self, mock_sleep):
         results = nvd_client.fetch_nvd(nvd_client.NvdSearchParams(cwes=[]))
         self.assertEqual(results, [])
+
+    @mock.patch("modules.nvd_client._fetch_cves_for_cwe")
+    @mock.patch("modules.nvd_client.time.sleep")
+    def test_all_cwe_failures_are_not_silently_empty(self, mock_sleep, mock_fetch):
+        mock_fetch.side_effect = nvd_client.NvdError("rate limited")
+        with self.assertRaises(nvd_client.NvdError):
+            nvd_client.fetch_nvd(nvd_client.NvdSearchParams(cwes=["79", "89"]))
 
     @mock.patch.dict(os.environ, {}, clear=True)
     def test_request_delay_without_key(self):

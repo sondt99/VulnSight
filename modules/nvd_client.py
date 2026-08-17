@@ -28,11 +28,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from .cwe_categories import normalize_cwe_id
+from .query_filters import published_bounds
 
 logger = logging.getLogger(__name__)
 
 NVD_BASE = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 USER_AGENT = "vulnsight/1.0 (+nvd)"
+NVD_EARLIEST = datetime(1988, 1, 1, tzinfo=timezone.utc)
 
 
 class NvdError(RuntimeError):
@@ -60,24 +62,50 @@ class NvdSearchParams:
     results_per_page: int = 200
 
 
-def _build_date_params(published: str | None) -> dict[str, str]:
-    """Convert a GHSA-style published filter (e.g. '>=2024-01-01') to NVD
-    pubStartDate/pubEndDate params. NVD limits date ranges to 120 days, so
-    for ranges longer than that we just set the start date."""
+def _format_nvd_date(value: datetime, *, end: bool = False) -> str:
+    suffix = "23:59:59.999Z" if end else "00:00:00.000Z"
+    return f"{value:%Y-%m-%d}T{suffix}"
+
+
+def _build_date_windows(
+    published: str | None, now: datetime | None = None
+) -> list[dict[str, str]]:
+    """Split a published filter into newest-first NVD-compatible windows.
+
+    NVD rejects ranges over 120 days.  Splitting preserves the user's requested
+    range instead of silently replacing an old start date with "120 days ago".
+    """
     if not published:
-        return {}
-    raw = published.lstrip(">= ")
-    try:
-        start = datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    except ValueError:
-        return {}
-    end = datetime.now(tz=timezone.utc)
-    if (end - start) > timedelta(days=120):
-        start = end - timedelta(days=120)
-    return {
-        "pubStartDate": start.strftime("%Y-%m-%dT00:00:00.000"),
-        "pubEndDate": end.strftime("%Y-%m-%dT23:59:59.999"),
-    }
+        return []
+    lower, upper = published_bounds(published)
+    now = now or datetime.now(tz=timezone.utc)
+    # NVD has no useful records before its historical lower bound. Clamping also
+    # prevents datetime underflow for syntactically valid dates near year 1.
+    start = max(lower or NVD_EARLIEST, NVD_EARLIEST)
+    end = min(upper or now, now)
+    if start > end:
+        return []
+
+    windows: list[dict[str, str]] = []
+    cursor_end = end
+    while cursor_end >= start:
+        # Date formatting expands to whole days, so 119 days between endpoints
+        # yields at most 120 consecutive calendar days (NVD's hard limit).
+        cursor_start = max(start, cursor_end - timedelta(days=119))
+        windows.append({
+            "pubStartDate": _format_nvd_date(cursor_start),
+            "pubEndDate": _format_nvd_date(cursor_end, end=True),
+        })
+        if cursor_start <= start:
+            break
+        cursor_end = cursor_start - timedelta(milliseconds=1)
+    return windows
+
+
+def _build_date_params(published: str | None) -> dict[str, str]:
+    """Compatibility helper returning the newest NVD date window."""
+    windows = _build_date_windows(published)
+    return windows[0] if windows else {}
 
 
 def _fetch_page(params: dict[str, str], timeout: int = 60) -> dict:
@@ -124,29 +152,45 @@ def _fetch_cves_for_cwe(cwe: str, params: NvdSearchParams) -> list[dict]:
     if params.keyword:
         base_q["keywordSearch"] = params.keyword
 
-    base_q.update(_build_date_params(params.published_range))
-
     results: list[dict] = []
-    start_index = 0
     delay = _request_delay()
+    windows = _build_date_windows(params.published_range) or [{}]
 
-    while len(results) < params.max_results:
-        q = dict(base_q, startIndex=str(start_index))
-        body = _fetch_page(q)
+    for window_index, window in enumerate(windows):
+        if len(results) >= params.max_results:
+            break
+        if window_index:
+            time.sleep(delay)
 
+        remaining = params.max_results - len(results)
+        # NVD recommends its optimized 2,000-row page size. Fetching a full page
+        # avoids a second tail request for most 120-day windows, then we trim
+        # locally to the caller's much smaller result budget.
+        page_size = min(max(params.results_per_page, remaining), 2000)
+        query = dict(base_q, **window, startIndex="0", resultsPerPage=str(page_size))
+        body = _fetch_page(query)
         vulns = body.get("vulnerabilities") or []
-        if not vulns:
-            break
+        total = int(body.get("totalResults") or len(vulns))
 
-        results.extend(vulns)
-        total = body.get("totalResults", 0)
-        start_index += len(vulns)
+        # NVD returns publish-date ascending. Fetch the tail page so a bounded
+        # "newest first" search does not return the oldest CVEs in the range.
+        if total > page_size:
+            time.sleep(delay)
+            tail_index = max(0, total - page_size)
+            body = _fetch_page(dict(query, startIndex=str(tail_index)))
+            vulns = body.get("vulnerabilities") or []
 
-        if start_index >= total or start_index >= params.max_results:
-            break
-        time.sleep(delay)
+        vulns.sort(
+            key=lambda item: ((item.get("cve") or {}).get("published") or ""),
+            reverse=True,
+        )
+        results.extend(vulns[:remaining])
 
-    return results[:params.max_results]
+    results.sort(
+        key=lambda item: ((item.get("cve") or {}).get("published") or ""),
+        reverse=True,
+    )
+    return results[: params.max_results]
 
 
 def fetch_nvd(params: NvdSearchParams) -> list[dict]:
@@ -157,27 +201,28 @@ def fetch_nvd(params: NvdSearchParams) -> list[dict]:
     seen_ids: set[str] = set()
     raw_all: list[dict] = []
     delay = _request_delay()
+    errors: list[NvdError] = []
+    successful_queries = 0
 
     for i, cwe in enumerate(params.cwes):
-        if len(raw_all) >= params.max_results:
-            break
         if i > 0:
             time.sleep(delay)
 
-        remaining = params.max_results - len(raw_all)
         per_cwe = NvdSearchParams(
             cwes=[cwe],
             keyword=params.keyword,
             severity=params.severity,
             published_range=params.published_range,
-            max_results=remaining,
-            results_per_page=min(remaining, 200),
+            max_results=params.max_results,
+            results_per_page=2000,
         )
         try:
             batch = _fetch_cves_for_cwe(cwe, per_cwe)
         except NvdError as e:
             logger.warning("NVD fetch for CWE-%s failed: %s", cwe, e)
+            errors.append(e)
             continue
+        successful_queries += 1
 
         for vuln in batch:
             cve_id = (vuln.get("cve") or {}).get("id", "")
@@ -185,7 +230,12 @@ def fetch_nvd(params: NvdSearchParams) -> list[dict]:
                 seen_ids.add(cve_id)
                 raw_all.append(vuln)
 
-    return [normalize(v) for v in raw_all[:params.max_results]]
+    if errors and not successful_queries:
+        raise NvdError(f"all NVD CWE queries failed; last error: {errors[-1]}")
+
+    normalized = [normalize(v) for v in raw_all]
+    normalized.sort(key=lambda item: item.get("published_at") or "", reverse=True)
+    return normalized[: params.max_results]
 
 
 # ---------------------------------------------------------------------------

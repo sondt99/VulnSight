@@ -51,6 +51,39 @@ class TestAIParsing(unittest.TestCase):
         self.assertTrue(v["is_match"])
         self.assertEqual(v["confidence"], 0.0)
 
+    def test_fingerprint_changes_with_model_and_advisory(self):
+        adv = ghsa.normalize(SAMPLE)
+        cfg = ai_classifier.AIConfig("anthropic", "https://x", ["tok"], "model-a")
+        original = ai_classifier.classification_fingerprint(cfg, adv, "bac")
+        changed_adv = dict(adv, description=adv["description"] + " changed")
+        self.assertNotEqual(
+            original,
+            ai_classifier.classification_fingerprint(cfg, changed_adv, "bac"),
+        )
+        changed_model = ai_classifier.AIConfig(
+            "anthropic", "https://x", ["tok"], "model-b"
+        )
+        self.assertNotEqual(
+            original,
+            ai_classifier.classification_fingerprint(changed_model, adv, "bac"),
+        )
+
+    def test_aggregate_multi_category_prefers_match(self):
+        aggregate = ai_classifier.aggregate_category_verdicts({
+            "xss": {"is_match": False, "confidence": 0.8, "cached": True},
+            "sqli": {
+                "is_match": True,
+                "confidence": 0.9,
+                "vuln_type": "SQLi",
+                "reason": "query concatenation",
+                "cached": True,
+            },
+        })
+        self.assertTrue(aggregate["is_match"])
+        self.assertEqual(aggregate["matched_category"], "sqli")
+        self.assertEqual(aggregate["scored_categories"], ["sqli", "xss"])
+        self.assertTrue(aggregate["cached"])
+
 
 class TestConfig(unittest.TestCase):
     def test_config_detection(self):

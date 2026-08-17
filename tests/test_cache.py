@@ -2,6 +2,7 @@
 the connection-lifecycle fix (no leaked WAL/SHM sidecar files)."""
 
 import os
+import sqlite3
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -50,6 +51,23 @@ class TestCache(unittest.TestCase):
         # different category -> not returned
         self.assertEqual(cache.get_classifications([gid], "sqli", self.db), {})
 
+    def test_classification_fingerprint_invalidates_stale_verdict(self):
+        gid = "GHSA-fingerprint"
+        verdict = {"is_match": True, "confidence": 0.9, "vuln_type": "BOLA", "reason": "r"}
+        cache.save_classification(
+            gid, "bac", verdict, "PRO", self.db, fingerprint="fingerprint-v1"
+        )
+        fresh = cache.get_classifications(
+            [gid], "bac", self.db,
+            expected_fingerprints={gid: "fingerprint-v1"},
+        )
+        stale = cache.get_classifications(
+            [gid], "bac", self.db,
+            expected_fingerprints={gid: "fingerprint-v2"},
+        )
+        self.assertIn(gid, fresh)
+        self.assertEqual(stale, {})
+
     def test_upsert_skips_bad_records_and_empty_list(self):
         cache.upsert_advisories([], self.db)  # early return, no error
         self.assertEqual(cache.count_advisories(self.db), 0)
@@ -64,6 +82,36 @@ class TestCache(unittest.TestCase):
 
     def test_get_classifications_empty_ids(self):
         self.assertEqual(cache.get_classifications([], "bac", self.db), {})
+
+    def test_init_db_migrates_legacy_classification_table(self):
+        legacy = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        legacy.close()
+        try:
+            connection = sqlite3.connect(legacy.name)
+            connection.execute(
+                """CREATE TABLE ai_classification (
+                    ghsa_id TEXT NOT NULL, category TEXT NOT NULL,
+                    is_match INTEGER NOT NULL, confidence REAL NOT NULL,
+                    vuln_type TEXT, reason TEXT, model TEXT, created_at REAL NOT NULL,
+                    PRIMARY KEY (ghsa_id, category)
+                )"""
+            )
+            connection.commit()
+            connection.close()
+            cache.init_db(legacy.name)
+            connection = sqlite3.connect(legacy.name)
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(ai_classification)")
+            }
+            connection.close()
+            self.assertIn("fingerprint", columns)
+        finally:
+            for ext in ("", "-wal", "-shm"):
+                try:
+                    os.unlink(legacy.name + ext)
+                except OSError:
+                    pass
 
     def test_no_wal_shm_leftover_after_operations(self):
         """Regression: every cache function must really close its connection.

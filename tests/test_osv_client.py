@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import io
 import json
+import tempfile
 import unittest
 import zipfile
 from unittest import mock
@@ -45,6 +46,24 @@ class TestNormalizeOsv(unittest.TestCase):
 
 
 class TestFetchOsv(unittest.TestCase):
+    def test_invalid_download_does_not_replace_cached_zip(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(osv_client, "CACHE_DIR", directory), \
+             mock.patch("modules.osv_client.urllib.request.urlopen") as urlopen:
+            path = osv_client._zip_path("Go")
+            good = make_osv_zip([OSV_NATIVE])
+            with open(path, "wb") as handle:
+                handle.write(good)
+            response = mock.MagicMock()
+            response.read.return_value = b"not-a-zip"
+            response.__enter__.return_value = response
+            response.__exit__.return_value = False
+            urlopen.return_value = response
+            with self.assertRaises(osv_client.OsvError):
+                osv_client.download_ecosystem("Go", force=True)
+            with open(path, "rb") as handle:
+                self.assertEqual(handle.read(), good)
+
     def test_zip_records_and_cwe_filter(self):
         # Build an in-memory bulk zip (samples.make_osv_zip replaces the removed
         # osv_client.bytes_to_records), unzip+normalize it ourselves, and drive
@@ -86,10 +105,27 @@ class TestFetchOsv(unittest.TestCase):
         self.assertEqual({r["ghsa_id"] for r in out_any},
                          {"GHSA-xr65-5cpm-g36x", "GHSA-low1-low1-low1"})
 
-    def test_fetch_osv_affects_filter_case_insensitive_substring(self):
+    def test_fetch_osv_published_filter(self):
         with mock.patch("modules.osv_client._load_records", return_value=self._two_severities()):
-            out = osv_client.fetch_osv("go", ["863"], affects="RANCHER/Fleet")
+            recent = osv_client.fetch_osv(
+                "go", ["863"], published=">=2026-01-01"
+            )
+        self.assertTrue(recent)
+        with mock.patch("modules.osv_client._load_records", return_value=self._two_severities()):
+            future = osv_client.fetch_osv(
+                "go", ["863"], published=">=2099-01-01"
+            )
+        self.assertEqual(future, [])
+
+    def test_fetch_osv_affects_filter_case_insensitive_exact(self):
+        with mock.patch("modules.osv_client._load_records", return_value=self._two_severities()):
+            out = osv_client.fetch_osv(
+                "go", ["863"], affects="GITHUB.COM/RANCHER/FLEET"
+            )
         self.assertEqual([r["ghsa_id"] for r in out], ["GHSA-xr65-5cpm-g36x"])
+        with mock.patch("modules.osv_client._load_records", return_value=self._two_severities()):
+            partial = osv_client.fetch_osv("go", ["863"], affects="RANCHER/Fleet")
+        self.assertEqual(partial, [])
         with mock.patch("modules.osv_client._load_records", return_value=self._two_severities()):
             out2 = osv_client.fetch_osv("go", ["863"], affects="no-such-package")
         self.assertEqual(out2, [])
@@ -114,6 +150,26 @@ class TestFetchOsvNative(unittest.TestCase):
         self.assertNotIn("GO-2024-002", ids)    # no keyword match
         self.assertNotIn("GHSA-xr65-5cpm-g36x", ids)  # GHSA-sourced excluded
         self.assertTrue(out[0]["native"])
+
+    def test_native_respects_common_filters(self):
+        native = dict(
+            OSV_NATIVE,
+            id="GO-2026-100",
+            summary="authorization bypass",
+            aliases=[],
+            database_specific={"severity": "HIGH"},
+        )
+        records = [osv_client.normalize_osv(native)]
+        package = records[0]["packages"][0]["name"]
+        with mock.patch("modules.osv_client._load_records", return_value=records):
+            out = osv_client.fetch_osv_native(
+                "go",
+                ["bac"],
+                affects=package.upper(),
+                severity="high",
+                published=">=2023-01-01",
+            )
+        self.assertEqual([record["ghsa_id"] for record in out], ["GO-2026-100"])
 
 
 if __name__ == "__main__":

@@ -109,6 +109,35 @@ class TestFlaskApp(unittest.TestCase):
             r = self.client.post("/api/search", json={"categories": ["bac"]})
         self.assertEqual(r.status_code, 502)
 
+    def test_mutating_apis_require_json_content_type(self):
+        r = self.client.post(
+            "/api/search", data='{"categories":["bac"]}', content_type="text/plain"
+        )
+        self.assertEqual(r.status_code, 415)
+        r = self.client.post(
+            "/api/ai/classify", data='{"ghsa_ids":["X"]}', content_type="text/plain"
+        )
+        self.assertEqual(r.status_code, 415)
+        with mock.patch("modules.ai_classifier.ping") as ping:
+            r = self.client.post(
+                "/api/ai/test", data="{}", content_type="text/plain"
+            )
+        self.assertEqual(r.status_code, 415)
+        ping.assert_not_called()
+
+    def test_ai_health_check_accepts_json_and_sets_security_headers(self):
+        with mock.patch(
+            "modules.ai_classifier.ping", return_value={"ok": True}
+        ) as ping:
+            r = self.client.post("/api/ai/test", json={})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.get_json()["ok"])
+        ping.assert_called_once_with()
+        self.assertEqual(r.headers["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(r.headers["X-Frame-Options"], "DENY")
+        self.assertEqual(r.headers["Referrer-Policy"], "no-referrer")
+        self.assertIn("default-src 'self'", r.headers["Content-Security-Policy"])
+
     def test_search_sort_updated_end_to_end(self):
         # Regression: body.sort="updated" used to be ignored (always published_at).
         with mock.patch("modules.ghsa_client.fetch_advisories", return_value=make_sortable_raw()):
@@ -122,14 +151,14 @@ class TestFlaskApp(unittest.TestCase):
 
     def test_ai_classify_not_configured(self):
         with mock.patch("modules.ai_classifier.load_config",
-                        return_value=ai_classifier.AIConfig("anthropic", "", "", "")):
+                        return_value=ai_classifier.AIConfig("anthropic", "", [], "")):
             r = self.client.post("/api/ai/classify", json={"category": "bac", "ghsa_ids": ["X"]})
         self.assertEqual(r.status_code, 400)
 
     def test_ai_classify_flow(self):
         # Seed cache with an advisory, then classify with mocked AI.
         cache.upsert_advisories([ghsa.normalize(SAMPLE)], cache.DB_PATH)
-        cfg = ai_classifier.AIConfig("anthropic", "https://x", "tok", "PRO")
+        cfg = ai_classifier.AIConfig("anthropic", "https://x", ["tok"], "PRO")
         with mock.patch("modules.ai_classifier.load_config", return_value=cfg), \
              mock.patch("modules.ai_classifier._call_messages",
                         return_value='{"is_match": true, "confidence": 0.9, "vuln_type": "IDOR", "reason": "r"}'):
@@ -140,11 +169,67 @@ class TestFlaskApp(unittest.TestCase):
         self.assertTrue(data["verdicts"][SAMPLE["ghsa_id"]]["is_match"])
         self.assertEqual(data["missing"], [])  # everything was in the cache
 
+    def test_ai_classifies_every_selected_category(self):
+        cache.upsert_advisories([ghsa.normalize(SAMPLE)], cache.DB_PATH)
+        cfg = ai_classifier.AIConfig("anthropic", "https://x", ["tok"], "PRO")
+        with mock.patch("modules.ai_classifier.load_config", return_value=cfg), \
+             mock.patch(
+                 "modules.ai_classifier._call_messages",
+                 return_value=(
+                     '{"is_match": true, "confidence": 0.9, '
+                     '"vuln_type": "match", "reason": "r"}'
+                 ),
+             ) as call:
+            r = self.client.post(
+                "/api/ai/classify",
+                json={
+                    "categories": ["xss", "sqli"],
+                    "ghsa_ids": [SAMPLE["ghsa_id"]],
+                },
+            )
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertEqual(data["categories"], ["xss", "sqli"])
+        self.assertEqual(set(data["by_category"]), {"xss", "sqli"})
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(
+            data["verdicts"][SAMPLE["ghsa_id"]]["scored_categories"],
+            ["sqli", "xss"],
+        )
+
+    def test_ai_batch_is_bounded(self):
+        cfg = ai_classifier.AIConfig("anthropic", "https://x", ["tok"], "PRO")
+        with mock.patch("modules.ai_classifier.load_config", return_value=cfg):
+            r = self.client.post(
+                "/api/ai/classify",
+                json={
+                    "category": "bac",
+                    "ghsa_ids": [f"GHSA-{index}" for index in range(101)],
+                },
+            )
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("maximum is", r.get_json()["error"])
+
+    def test_ai_classify_rejects_nested_and_oversized_list_values(self):
+        cfg = ai_classifier.AIConfig("anthropic", "https://x", ["tok"], "PRO")
+        with mock.patch("modules.ai_classifier.load_config", return_value=cfg):
+            for body in (
+                {"categories": [{"name": "bac"}], "ghsa_ids": ["X"]},
+                {"categories": ["bac"], "ghsa_ids": [{"id": "X"}]},
+                {"categories": ["bac"], "ghsa_ids": ["X" * 201]},
+            ):
+                with self.subTest(body=body):
+                    r = self.client.post("/api/ai/classify", json=body)
+                    self.assertEqual(r.status_code, 400)
+
+    def test_ai_health_check_is_post_only(self):
+        self.assertEqual(self.client.get("/api/ai/test").status_code, 405)
+
     def test_ai_classify_reports_missing_ids(self):
         # Regression: ids absent from the cache used to be dropped silently;
         # now they must come back in "missing" (and the call still succeeds).
         cache.upsert_advisories([ghsa.normalize(SAMPLE)], cache.DB_PATH)
-        cfg = ai_classifier.AIConfig("anthropic", "https://x", "tok", "PRO")
+        cfg = ai_classifier.AIConfig("anthropic", "https://x", ["tok"], "PRO")
         with mock.patch("modules.ai_classifier.load_config", return_value=cfg), \
              mock.patch("modules.ai_classifier._call_messages",
                         return_value='{"is_match": true, "confidence": 0.9, "vuln_type": "IDOR", "reason": "r"}'):
@@ -154,7 +239,10 @@ class TestFlaskApp(unittest.TestCase):
                       "ghsa_ids": [SAMPLE["ghsa_id"], "GHSA-not-in-cache"]})
         self.assertEqual(r.status_code, 200)
         data = r.get_json()
-        self.assertEqual(set(data.keys()), {"category", "verdicts", "missing"})
+        self.assertEqual(
+            set(data.keys()),
+            {"category", "categories", "verdicts", "by_category", "missing"},
+        )
         self.assertEqual(data["missing"], ["GHSA-not-in-cache"])
         self.assertIn(SAMPLE["ghsa_id"], data["verdicts"])
         self.assertNotIn("GHSA-not-in-cache", data["verdicts"])
@@ -230,6 +318,40 @@ class TestFlaskApp(unittest.TestCase):
         self.assertIn(b"window.BOOT", r.data)
         self.assertIn(b"app.js", r.data)
         self.assertIn(b"style.css", r.data)
+
+    def test_index_keeps_frontend_dom_contract(self):
+        """The visual shell may change, but app.js hooks must remain stable."""
+        with mock.patch("modules.ghsa_client.gh_auth_ok", return_value=False):
+            html = self.client.get("/").get_data(as_text=True)
+
+        required_ids = [
+            "scenario", "refresh_osv", "include_extended", "ecosystem",
+            "severity", "affects_pick", "published", "max_results", "sort",
+            "direction", "type", "extra_cwes_count", "auto-btn", "search-btn",
+            "summary", "ai-btn", "retry-btn", "only_match", "export-btn",
+            "results", "ai-test-pill", "filters-toggle", "filters-close",
+            "filter-scrim",
+        ]
+        for element_id in required_ids:
+            self.assertEqual(html.count(f'id="{element_id}"'), 1, element_id)
+
+        for name in ("category", "source", "extra_cwe"):
+            self.assertIn(f'name="{name}"', html)
+        for export_format in ("csv", "json", "csv-matches"):
+            self.assertIn(f'data-fmt="{export_format}"', html)
+        self.assertLess(html.index("window.BOOT"), html.index("app.js"))
+        self.assertIn('id="ai-test-pill" type="button"', html)
+        self.assertNotIn("style=", html)
+
+    def test_index_csp_nonce_matches_header(self):
+        with mock.patch("modules.ghsa_client.gh_auth_ok", return_value=False):
+            r = self.client.get("/")
+        html = r.get_data(as_text=True)
+        csp = r.headers["Content-Security-Policy"]
+        marker = 'script nonce="'
+        nonce = html.split(marker, 1)[1].split('"', 1)[0]
+        self.assertGreaterEqual(len(nonce), 20)
+        self.assertIn(f"'nonce-{nonce}'", csp)
 
 
 if __name__ == "__main__":

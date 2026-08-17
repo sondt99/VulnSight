@@ -60,7 +60,7 @@ limit. The tool handles this at three levels:
   on demand. Successful verdicts are cached, so retries never re-spend tokens on
   advisories that already succeeded.
 
-## Data sources (GHSA + OSV.dev)
+## Data sources (GHSA + NVD + OSV.dev)
 
 Pick one or more sources in the **DATA SOURCES** panel. Results are merged and
 de-duplicated across sources (by CVE → GHSA id → OSV id); a record found in more
@@ -68,6 +68,8 @@ than one source is tagged e.g. `GHSA+OSV`.
 
 - **GHSA** — GitHub Advisory Database via `gh`. Filters by CWE **server-side**;
   works for any ecosystem. This is the primary browse engine.
+- **NVD** — NIST CVE API v2. Long published-date searches are split into
+  API-compatible 120-day windows, then merged with the other sources by aliases.
 - **OSV.dev** — the OSV bulk export (`{ecosystem}/all.zip`, ~10 MB, cached daily
   under `osv_cache/`). Filtered by CWE **locally**. Needs a specific ecosystem.
 - **OSV native** — source-native records (`GO-`, `RUSTSEC-`, `PYSEC-`, …) that

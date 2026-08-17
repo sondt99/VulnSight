@@ -20,10 +20,12 @@ records (GO-..., RUSTSEC-..., PYSEC-..., etc.).
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
 import re
+import threading
 import time
 import urllib.request
 import zipfile
@@ -31,6 +33,7 @@ import zipfile
 from .config import BASE_DIR
 from .cvss import base_score, severity_from_score
 from .cwe_categories import category_keywords, normalize_cwe_id
+from .query_filters import matches_common_filters
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +59,9 @@ ECOSYSTEM_MAP: dict[str, str] = {
 }
 
 # In-process cache of parsed+normalized records, keyed by GHSA ecosystem name.
-_MEM: dict[str, list[dict]] = {}
+# The zip mtime is retained so a long-running server notices a refreshed file.
+_MEM: dict[str, tuple[float, list[dict]]] = {}
+_DOWNLOAD_LOCK = threading.Lock()
 
 
 class OsvError(RuntimeError):
@@ -79,26 +84,33 @@ def _zip_path(osv_eco: str) -> str:
 def download_ecosystem(osv_eco: str, force: bool = False,
                        max_age: int = DEFAULT_MAX_AGE, timeout: int = 120) -> str:
     """Ensure the ecosystem's all.zip is cached locally; return its path."""
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    path = _zip_path(osv_eco)
-    if (not force and os.path.exists(path)
-            and (time.time() - os.path.getmtime(path)) < max_age
-            and os.path.getsize(path) > 0):
+    with _DOWNLOAD_LOCK:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        path = _zip_path(osv_eco)
+        if (not force and os.path.exists(path)
+                and (time.time() - os.path.getmtime(path)) < max_age
+                and os.path.getsize(path) > 0):
+            return path
+
+        url = f"{OSV_BASE}/{osv_eco}/all.zip"
+        req = urllib.request.Request(url, headers={"user-agent": USER_AGENT})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = resp.read()
+        except Exception as e:  # noqa: BLE001 - surface a clean message to the UI
+            raise OsvError(f"could not download OSV bulk for {osv_eco}: {e}") from e
+
+        if not zipfile.is_zipfile(io.BytesIO(data)):
+            raise OsvError(f"OSV bulk response for {osv_eco} is not a valid zip archive")
+
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.replace(tmp, path)
+        except OSError as e:
+            raise OsvError(f"could not cache OSV bulk for {osv_eco}: {e}") from e
         return path
-
-    url = f"{OSV_BASE}/{osv_eco}/all.zip"
-    req = urllib.request.Request(url, headers={"user-agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = resp.read()
-    except Exception as e:  # noqa: BLE001 - surface a clean message to the UI
-        raise OsvError(f"could not download OSV bulk for {osv_eco}: {e}") from e
-
-    tmp = path + ".tmp"
-    with open(tmp, "wb") as f:
-        f.write(data)
-    os.replace(tmp, path)
-    return path
 
 
 _QUAL_MAP = {"LOW": "low", "MODERATE": "medium", "MEDIUM": "medium",
@@ -142,19 +154,24 @@ def normalize_osv(rec: dict) -> dict:
         name = pkg.get("name")
         if not name:
             continue
-        first_patched = None
-        for rng in aff.get("ranges") or []:
+        ranges = aff.get("ranges") or []
+        fixed_versions = []
+        for rng in ranges:
             for ev in rng.get("events") or []:
                 if ev.get("fixed"):
-                    first_patched = ev["fixed"]
+                    fixed_versions.append(ev["fixed"])
         eco = pkg.get("ecosystem")
         if eco:
             ecos.add(eco)
         packages.append({
             "ecosystem": eco,
             "name": name,
+            "purl": pkg.get("purl"),
             "vulnerable_version_range": None,
-            "first_patched_version": first_patched,
+            "first_patched_version": fixed_versions[0] if fixed_versions else None,
+            "fixed_versions": fixed_versions,
+            "ranges": ranges,
+            "versions": aff.get("versions") or [],
         })
 
     return {
@@ -171,6 +188,7 @@ def normalize_osv(rec: dict) -> dict:
         "references": [r.get("url") for r in (rec.get("references") or []) if r.get("url")],
         "published_at": rec.get("published"),
         "updated_at": rec.get("modified"),
+        "withdrawn_at": rec.get("withdrawn"),
         "type": "osv",
         "source": "osv",
         "osv_id": osv_id,
@@ -184,32 +202,36 @@ def normalize_osv(rec: dict) -> dict:
 
 def _load_records(ghsa_ecosystem: str, force: bool = False) -> list[dict]:
     """Return all normalized OSV records for an ecosystem (memoised)."""
-    if not force and ghsa_ecosystem in _MEM:
-        return _MEM[ghsa_ecosystem]
     osv_eco = ECOSYSTEM_MAP.get(ghsa_ecosystem)
     if not osv_eco:
         raise OsvError(f"ecosystem '{ghsa_ecosystem}' not supported by OSV bulk mode")
     path = download_ecosystem(osv_eco, force=force)
+    mtime = os.path.getmtime(path)
+    cached = _MEM.get(ghsa_ecosystem)
+    if not force and cached and cached[0] == mtime:
+        return cached[1]
     records: list[dict] = []
-    with zipfile.ZipFile(path) as zf:
-        for name in zf.namelist():
-            if not name.endswith(".json"):
-                continue
-            try:
-                rec = json.loads(zf.read(name))
-            except (json.JSONDecodeError, KeyError):
-                logger.debug("skipping unparsable OSV record %s in %s", name, path)
-                continue
-            if rec.get("withdrawn"):
-                continue
-            records.append(normalize_osv(rec))
-    _MEM[ghsa_ecosystem] = records
+    try:
+        with zipfile.ZipFile(path) as zf:
+            for name in zf.namelist():
+                if not name.endswith(".json"):
+                    continue
+                try:
+                    rec = json.loads(zf.read(name))
+                except (json.JSONDecodeError, KeyError):
+                    logger.debug("skipping unparsable OSV record %s in %s", name, path)
+                    continue
+                records.append(normalize_osv(rec))
+    except (OSError, zipfile.BadZipFile) as e:
+        raise OsvError(f"invalid OSV bulk archive for {osv_eco}: {e}") from e
+    _MEM[ghsa_ecosystem] = (mtime, records)
     return records
 
 
 def fetch_osv(ecosystem: str, cwes: list[str], affects: str | None = None,
               severity: str | None = None, max_results: int = 200,
-              force_refresh: bool = False) -> list[dict]:
+              force_refresh: bool = False,
+              published: str | None = None) -> list[dict]:
     """Filter the ecosystem's OSV records by CWE set (+ optional package/severity).
 
     Records with none of the target CWEs are dropped. Sorted newest-first.
@@ -224,21 +246,25 @@ def fetch_osv(ecosystem: str, cwes: list[str], affects: str | None = None,
         rec_cwes = {normalize_cwe_id(c) for c in r.get("cwes") or []}
         if not (rec_cwes & want):
             continue
-        if severity and severity != "any" and r.get("severity") != severity:
+        if not matches_common_filters(
+            r, published=published, affects=affects, severity=severity
+        ):
             continue
-        if affects:
-            names = [p.get("name", "") for p in r.get("packages") or []]
-            if not any(affects.lower() == n.lower() or affects.lower() in n.lower()
-                       for n in names):
-                continue
         out.append(r)
 
     out.sort(key=lambda r: (r.get("published_at") or ""), reverse=True)
     return out[:max_results]
 
 
-def fetch_osv_native(ecosystem: str, categories: list[str], max_results: int = 100,
-                     force_refresh: bool = False) -> list[dict]:
+def fetch_osv_native(
+    ecosystem: str,
+    categories: list[str],
+    max_results: int = 100,
+    force_refresh: bool = False,
+    affects: str | None = None,
+    severity: str | None = None,
+    published: str | None = None,
+) -> list[dict]:
     """Return source-native OSV records (GO-/RUSTSEC-/PYSEC-…) that CWE filtering
     can never reach, narrowed by bug-class keywords so the AI has a sane pool.
 
@@ -260,6 +286,10 @@ def fetch_osv_native(ecosystem: str, categories: list[str], max_results: int = 1
             text = (r.get("summary", "") + " " + r.get("description", "")).lower()
             if not any(k in text for k in kws):
                 continue
+        if not matches_common_filters(
+            r, published=published, affects=affects, severity=severity
+        ):
+            continue
         out.append(dict(r, native=True))
 
     out.sort(key=lambda r: (r.get("published_at") or ""), reverse=True)
