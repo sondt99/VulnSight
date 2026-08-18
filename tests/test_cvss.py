@@ -1,4 +1,4 @@
-"""Tests for cvss: base-score computation, spec Roundup() and severity buckets."""
+"""Tests for cvss: base-score computation, v4 estimation, spec Roundup() and severity buckets."""
 
 import os
 import sys
@@ -16,7 +16,7 @@ class TestBaseScore(unittest.TestCase):
         # Ported from the old osv_client.cvss3_base_score coverage.
         self.assertEqual(cvss.base_score("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"), 9.8)
         self.assertEqual(cvss.base_score("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H"), 8.1)
-        self.assertIsNone(cvss.base_score("CVSS:4.0/AV:N"))  # v4 unsupported
+        self.assertIsNone(cvss.base_score("CVSS:4.0/AV:N"))  # v4 handled by base_score_v4
         self.assertIsNone(cvss.base_score(""))
 
     def test_invalid_vectors_return_none(self):
@@ -55,6 +55,60 @@ class TestSeverityFromScore(unittest.TestCase):
         for score, want in cases:
             with self.subTest(score=score):
                 self.assertEqual(cvss.severity_from_score(score), want)
+
+
+class TestBaseScoreV4(unittest.TestCase):
+    """CVSS v4.0 rough estimation via base_score_v4()."""
+
+    def test_full_v4_vector_network_high_impact(self):
+        # AV:N/AC:L with all high impact -> critical bucket.
+        vec = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"
+        score = cvss.base_score_v4(vec)
+        self.assertIsNotNone(score)
+        self.assertGreaterEqual(score, 9.0)  # critical
+
+    def test_v4_network_low_impact(self):
+        vec = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N"
+        score = cvss.base_score_v4(vec)
+        self.assertIsNotNone(score)
+        self.assertGreaterEqual(score, 4.0)  # medium
+        self.assertLess(score, 9.0)
+
+    def test_v4_physical_high_complexity(self):
+        vec = "CVSS:4.0/AV:P/AC:H/AT:P/PR:H/UI:A/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N"
+        score = cvss.base_score_v4(vec)
+        self.assertIsNotNone(score)
+        self.assertLess(score, 4.0)  # low
+
+    def test_v4_no_impact_returns_zero(self):
+        vec = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SC:N/SI:N/SA:N"
+        self.assertEqual(cvss.base_score_v4(vec), 0.0)
+
+    def test_v4_subsequent_system_impact(self):
+        # High subsequent-system impact should still register.
+        vec = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SC:H/SI:H/SA:H"
+        score = cvss.base_score_v4(vec)
+        self.assertIsNotNone(score)
+        self.assertGreaterEqual(score, 9.0)
+
+    def test_v4_non_v4_returns_none(self):
+        self.assertIsNone(cvss.base_score_v4("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"))
+        self.assertIsNone(cvss.base_score_v4(""))
+        self.assertIsNone(cvss.base_score_v4(None))
+
+    def test_v4_missing_required_metrics(self):
+        # Missing AC entirely.
+        self.assertIsNone(cvss.base_score_v4("CVSS:4.0/AV:N"))
+        # Unknown AV value.
+        self.assertIsNone(cvss.base_score_v4("CVSS:4.0/AV:Z/AC:L"))
+
+    def test_v4_severity_buckets_match(self):
+        # severity_from_score works the same for v4 scores.
+        vec_crit = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"
+        self.assertEqual(cvss.severity_from_score(cvss.base_score_v4(vec_crit)), "critical")
+
+        vec_zero = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:N/SC:N/SI:N/SA:N"
+        self.assertEqual(cvss.severity_from_score(cvss.base_score_v4(vec_zero)), "unknown")
 
 
 if __name__ == "__main__":

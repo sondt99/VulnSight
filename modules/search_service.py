@@ -9,17 +9,24 @@ from dataclasses import dataclass
 
 from . import ai_classifier
 from . import cache
+from . import epss_client
 from . import ghsa_client as ghsa
 from . import nvd_client
 from . import osv_client
 from .cwe_categories import CATEGORIES, ECOSYSTEMS, SEVERITIES, cwe_label, normalize_cwe_id, resolve_cwes
 from .query_filters import matches_common_filters, valid_published_filter
 
-VALID_SORTS = ("published", "updated", "cve_id")
+VALID_SORTS = ("published", "updated", "cve_id", "epss_percentage", "epss_percentile")
 VALID_DIRECTIONS = ("asc", "desc")
 VALID_SOURCES = ("ghsa", "nvd", "osv", "osv-native")
 VALID_TYPES = ("reviewed", "unreviewed", "malware")
-_SORT_FIELD = {"published": "published_at", "updated": "updated_at", "cve_id": "cve_id"}
+_SORT_FIELD = {
+    "published": "published_at",
+    "updated": "updated_at",
+    "cve_id": "cve_id",
+    "epss_percentage": "epss_percentage",
+    "epss_percentile": "epss_percentile",
+}
 MAX_CATEGORY_INPUTS = 100
 MAX_EXTRA_CWES = 100
 MAX_CWE_ID_DIGITS = 7
@@ -173,7 +180,9 @@ def parse_search_query(body: dict) -> SearchQuery:
         field_name="categories",
         max_items=MAX_CATEGORY_INPUTS,
         max_item_length=64,
-    ) or ["bac"]
+    )
+    if not category_inputs:
+        raise SearchError("Select at least one vulnerability category.", 400)
     categories = list(dict.fromkeys(category_inputs))
     include_extended = parse_bool(body.get("include_extended"), True)
     ecosystem = parse_text(body.get("ecosystem"), "any", "ecosystem")
@@ -251,7 +260,7 @@ _SEVERITY_RANK = {"unknown": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 
 
 def _record_identifier_values(record: dict) -> list[str]:
-    values = [record.get("cve_id"), record.get("ghsa_id"), record.get("osv_id")]
+    values = [record.get("advisory_id"), record.get("cve_id"), record.get("ghsa_id"), record.get("osv_id")]
     values.extend(record.get("aliases") or [])
     return [str(value).strip() for value in values if str(value or "").strip()]
 
@@ -308,6 +317,10 @@ def _merge_group(records: list[dict]) -> dict:
         merged["ghsa_id"] = base_id if base_id.upper().startswith("GHSA-") else ghsa_ids[0]
     elif cve_ids:
         merged["ghsa_id"] = cve_ids[0]
+    # advisory_id: prefer the base record's advisory_id; fall back to best
+    # GHSA or CVE identifier so the merged record always has a stable key.
+    if not merged.get("advisory_id"):
+        merged["advisory_id"] = merged.get("ghsa_id") or (cve_ids[0] if cve_ids else "")
     if cve_ids:
         base_cve = str(base.get("cve_id") or "")
         merged["cve_id"] = base_cve if base_cve.upper().startswith("CVE-") else cve_ids[0]
@@ -416,9 +429,10 @@ def run_search(q: SearchQuery) -> SearchOutcome:
 
     # --- GHSA (server-side CWE filter) ---
     if "ghsa" in q.sources:
+        ghsa_sort = q.sort if q.sort in ("published", "updated") else "published"
         params = ghsa.SearchParams(
             ecosystem=q.ecosystem, cwes=q.cwes, affects=q.affects, severity=q.severity,
-            type=q.adv_type, published=q.published, sort=q.sort, direction=q.direction,
+            type=q.adv_type, published=q.published, sort=ghsa_sort, direction=q.direction,
             max_results=q.max_results, per_page=100,
         )
         try:
@@ -503,6 +517,17 @@ def run_search(q: SearchQuery) -> SearchOutcome:
         )
     ]
 
+    # Enrich with EPSS scores before sorting so epss_percentage / epss_percentile
+    # sort modes work correctly.
+    cve_ids = [r["cve_id"] for r in results if r.get("cve_id")]
+    if cve_ids:
+        epss_scores = epss_client.fetch_epss(cve_ids)
+        for rec in results:
+            score = epss_scores.get(rec.get("cve_id", ""))
+            if score:
+                rec["epss_percentage"] = score["epss"]
+                rec["epss_percentile"] = score["percentile"]
+
     # Sort by the requested field. (Fixes the old behaviour of always sorting
     # by published_at even when sort=updated or sort=cve_id was requested.)
     field = _SORT_FIELD[q.sort]
@@ -524,7 +549,7 @@ def run_search(q: SearchQuery) -> SearchOutcome:
         cached_by_category: dict[str, dict[str, dict]] = {}
         for category in ai_categories:
             fingerprints = {
-                rec["ghsa_id"]: ai_classifier.classification_fingerprint(
+                rec["advisory_id"]: ai_classifier.classification_fingerprint(
                     cfg, rec, category
                 )
                 for rec in results
@@ -535,11 +560,11 @@ def run_search(q: SearchQuery) -> SearchOutcome:
                 expected_fingerprints=fingerprints,
             )
         for rec in results:
-            gid = rec["ghsa_id"]
+            aid = rec["advisory_id"]
             category_verdicts = {
-                category: cached_by_category[category][gid]
+                category: cached_by_category[category][aid]
                 for category in ai_categories
-                if gid in cached_by_category[category]
+                if aid in cached_by_category[category]
             }
             if len(category_verdicts) == len(ai_categories):
                 rec["ai"] = ai_classifier.aggregate_category_verdicts(

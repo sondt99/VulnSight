@@ -21,7 +21,8 @@ from samples import NVD_VULN
 class TestNormalize(unittest.TestCase):
     def test_basic_fields(self):
         n = nvd_client.normalize(NVD_VULN)
-        self.assertEqual(n["ghsa_id"], "CVE-2021-44228")
+        self.assertIsNone(n["ghsa_id"])
+        self.assertEqual(n["advisory_id"], "CVE-2021-44228")
         self.assertEqual(n["cve_id"], "CVE-2021-44228")
         self.assertEqual(n["source"], "nvd")
         self.assertEqual(n["severity"], "critical")
@@ -187,6 +188,59 @@ class TestNormalizeCVSSFallback(unittest.TestCase):
         n = nvd_client.normalize(vuln)
         self.assertIsNone(n["cvss_score"])
         self.assertEqual(n["severity"], "unknown")
+
+    def test_v40_preferred_over_v31(self):
+        """When both v4.0 and v3.1 metrics exist, v4.0 is preferred."""
+        vuln = {
+            "cve": {
+                "id": "CVE-2026-99999",
+                "descriptions": [{"lang": "en", "value": "v4 vuln"}],
+                "metrics": {
+                    "cvssMetricV31": [{
+                        "cvssData": {
+                            "version": "3.1",
+                            "baseScore": 7.5,
+                            "baseSeverity": "HIGH",
+                        },
+                    }],
+                    "cvssMetricV40": [{
+                        "cvssData": {
+                            "version": "4.0",
+                            "baseScore": 8.7,
+                            "baseSeverity": "HIGH",
+                        },
+                    }],
+                },
+                "weaknesses": [],
+                "references": [],
+            },
+        }
+        n = nvd_client.normalize(vuln)
+        self.assertEqual(n["cvss_score"], 8.7)
+        self.assertEqual(n["severity"], "high")
+
+    def test_v40_only(self):
+        """A CVE with only v4.0 metrics still extracts correctly."""
+        vuln = {
+            "cve": {
+                "id": "CVE-2026-88888",
+                "descriptions": [{"lang": "en", "value": "v4 only"}],
+                "metrics": {
+                    "cvssMetricV40": [{
+                        "cvssData": {
+                            "version": "4.0",
+                            "baseScore": 9.3,
+                            "baseSeverity": "CRITICAL",
+                        },
+                    }],
+                },
+                "weaknesses": [],
+                "references": [],
+            },
+        }
+        n = nvd_client.normalize(vuln)
+        self.assertEqual(n["cvss_score"], 9.3)
+        self.assertEqual(n["severity"], "critical")
 
 
 if __name__ == "__main__":

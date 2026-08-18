@@ -31,7 +31,7 @@ import urllib.request
 import zipfile
 
 from .config import BASE_DIR
-from .cvss import base_score, severity_from_score
+from .cvss import base_score, base_score_v4, severity_from_score
 from .cwe_categories import category_keywords, normalize_cwe_id
 from .query_filters import matches_common_filters
 
@@ -59,8 +59,11 @@ ECOSYSTEM_MAP: dict[str, str] = {
 }
 
 # In-process cache of parsed+normalized records, keyed by GHSA ecosystem name.
-# The zip mtime is retained so a long-running server notices a refreshed file.
+# Each entry is (loaded_at_timestamp, records).  TTL-based eviction prevents
+# unbounded growth over the lifetime of a long-running process.
 _MEM: dict[str, tuple[float, list[dict]]] = {}
+_MEM_TTL = 3600   # seconds – evict cached records older than 1 hour
+_MEM_MAX = 5      # max ecosystems kept in memory at once
 _DOWNLOAD_LOCK = threading.Lock()
 
 
@@ -135,13 +138,21 @@ def normalize_osv(rec: dict) -> dict:
     cwes = list((rec.get("database_specific") or {}).get("cwe_ids") or [])
 
     # severity: prefer qualitative from database_specific, else compute CVSS.
+    # Try v4 first, then fall back to v3.
     ds_sev = (rec.get("database_specific") or {}).get("severity")
     cvss_score = None
     for s in rec.get("severity") or []:
-        if str(s.get("type", "")).startswith("CVSS_V3"):
-            cvss_score = base_score(s.get("score", ""))
+        stype = str(s.get("type", ""))
+        if stype == "CVSS_V4":
+            cvss_score = base_score_v4(s.get("score", ""))
             if cvss_score is not None:
                 break
+    if cvss_score is None:
+        for s in rec.get("severity") or []:
+            if str(s.get("type", "")).startswith("CVSS_V3"):
+                cvss_score = base_score(s.get("score", ""))
+                if cvss_score is not None:
+                    break
     if ds_sev and str(ds_sev).upper() in _QUAL_MAP:
         severity = _QUAL_MAP[str(ds_sev).upper()]
     else:
@@ -175,6 +186,7 @@ def normalize_osv(rec: dict) -> dict:
         })
 
     return {
+        "advisory_id": ghsa_id,
         "ghsa_id": ghsa_id,
         "cve_id": cve_id,
         "summary": rec.get("summary") or (rec.get("details") or "")[:120],
@@ -201,15 +213,22 @@ def normalize_osv(rec: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def _load_records(ghsa_ecosystem: str, force: bool = False) -> list[dict]:
-    """Return all normalized OSV records for an ecosystem (memoised)."""
+    """Return all normalized OSV records for an ecosystem (memoised).
+
+    Cached entries are evicted after *_MEM_TTL* seconds, and the total number
+    of cached ecosystems is capped at *_MEM_MAX* (oldest-first eviction).
+    """
     osv_eco = ECOSYSTEM_MAP.get(ghsa_ecosystem)
     if not osv_eco:
         raise OsvError(f"ecosystem '{ghsa_ecosystem}' not supported by OSV bulk mode")
+
+    # Fast path: return cached records if within TTL.
+    if not force and ghsa_ecosystem in _MEM:
+        loaded_at, records = _MEM[ghsa_ecosystem]
+        if (time.time() - loaded_at) < _MEM_TTL:
+            return records
+
     path = download_ecosystem(osv_eco, force=force)
-    mtime = os.path.getmtime(path)
-    cached = _MEM.get(ghsa_ecosystem)
-    if not force and cached and cached[0] == mtime:
-        return cached[1]
     records: list[dict] = []
     try:
         with zipfile.ZipFile(path) as zf:
@@ -224,7 +243,14 @@ def _load_records(ghsa_ecosystem: str, force: bool = False) -> list[dict]:
                 records.append(normalize_osv(rec))
     except (OSError, zipfile.BadZipFile) as e:
         raise OsvError(f"invalid OSV bulk archive for {osv_eco}: {e}") from e
-    _MEM[ghsa_ecosystem] = (mtime, records)
+
+    _MEM[ghsa_ecosystem] = (time.time(), records)
+
+    # Cap the number of ecosystems held in memory.
+    if len(_MEM) > _MEM_MAX:
+        oldest = min(_MEM, key=lambda k: _MEM[k][0])
+        del _MEM[oldest]
+
     return records
 
 

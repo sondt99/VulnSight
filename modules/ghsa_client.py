@@ -190,6 +190,7 @@ def normalize(adv: dict) -> dict:
             "first_patched_version": v.get("first_patched_version"),
         })
     return {
+        "advisory_id": adv.get("ghsa_id"),
         "ghsa_id": adv.get("ghsa_id"),
         "cve_id": adv.get("cve_id"),
         "summary": adv.get("summary") or "",

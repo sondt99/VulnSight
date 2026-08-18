@@ -56,11 +56,12 @@ USER_AGENT = (
 # throttling, network blips). Client errors like a bad API key are NOT retried.
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 1.5          # seconds; grows exponentially with jitter
-RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504, 403, 520, 522, 524}
+RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524}
 
 # The provider's "PRO" model is a reasoning model (GLM): it spends output tokens
 # "thinking" before answering. Too small a budget truncates the JSON verdict or
 # leaves an empty visible answer, so give it generous room.
+CLASSIFY_TIMEOUT = int(os.environ.get("AI_CLASSIFY_TIMEOUT", "180"))
 CLASSIFY_MAX_TOKENS = 4096
 CLASSIFIER_VERSION = "2"
 
@@ -440,7 +441,7 @@ def classify_one(cfg: AIConfig, adv: dict, category: str,
     for attempt in range(max_attempts):
         try:
             text = _call_messages(cfg, system, user, max_tokens=CLASSIFY_MAX_TOKENS,
-                                      timeout=180)
+                                      timeout=CLASSIFY_TIMEOUT)
             return _parse_verdict(text)
         except AIError as e:
             last = e
@@ -465,18 +466,21 @@ def classify_many(
     max_workers: int = 2,
     on_result: Callable[[str, dict], None] | None = None,
 ) -> dict[str, dict]:
-    """Classify many advisories concurrently. Returns {ghsa_id: verdict}.
+    """Classify many advisories concurrently. Returns {advisory_id: verdict}.
 
     Failures are captured per-advisory as {error:...} so one bad call does not
-    sink the whole batch. `on_result(ghsa_id, verdict)` is called as each
+    sink the whole batch. `on_result(advisory_id, verdict)` is called as each
     completes (used to persist to cache incrementally).
     """
     results: dict[str, dict] = {}
     if not advisories:
         return results
 
-    def _job(adv: dict) -> tuple[str, dict]:
-        gid = adv.get("ghsa_id") or ""
+    def _job(adv: dict, key_offset: int) -> tuple[str, dict]:
+        gid = adv.get("advisory_id") or ""
+        # Set this worker's starting key
+        with cfg._lock:
+            cfg._current_idx = key_offset % len(cfg.tokens) if cfg.tokens else 0
         try:
             return gid, classify_one(cfg, adv, category)
         except AIError as e:
@@ -490,7 +494,7 @@ def classify_many(
                          "confidence": 0.0, "cached": False}
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = [ex.submit(_job, a) for a in advisories]
+        futures = [ex.submit(_job, a, i) for i, a in enumerate(advisories)]
         for fut in as_completed(futures):
             gid, verdict = fut.result()
             results[gid] = verdict

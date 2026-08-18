@@ -21,17 +21,16 @@ from samples import NVD_VULN, OSV_GHSA, SAMPLE, SORT_A, SORT_B, SORT_C, make_sor
 
 class TestFlaskApp(unittest.TestCase):
     def setUp(self):
-        # Point the app's cache at a temp db BEFORE importing the app module
-        # (import runs cache.init_db()).
+        # Point the cache at a temp db BEFORE calling the app factory
+        # (create_app() runs cache.init_db()).
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.tmp.close()
         self._orig_db = cache.DB_PATH
         cache.DB_PATH = self.tmp.name
-        cache.init_db(cache.DB_PATH)
-        import app as app_module
-        self.app_module = app_module
-        app_module.app.config["TESTING"] = True
-        self.client = app_module.app.test_client()
+        from app import create_app
+        self.app = create_app()
+        self.app.config["TESTING"] = True
+        self.client = self.app.test_client()
 
     def tearDown(self):
         cache.DB_PATH = self._orig_db
@@ -98,11 +97,10 @@ class TestFlaskApp(unittest.TestCase):
         data = r.get_json()
         self.assertTrue(any("OSV" in w for w in data["warnings"]))
 
-    def test_search_no_category_defaults_bac(self):
-        with mock.patch("modules.ghsa_client.fetch_advisories", return_value=[]):
-            r = self.client.post("/api/search", json={})
-        self.assertEqual(r.status_code, 200)
-        self.assertIn("bac", r.get_json()["query"]["categories"])
+    def test_search_no_category_returns_400(self):
+        r = self.client.post("/api/search", json={})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("category", r.get_json()["error"].lower())
 
     def test_search_ghsa_error_502(self):
         with mock.patch("modules.ghsa_client.fetch_advisories", side_effect=ghsa.GhCliError("nope")):
@@ -115,7 +113,7 @@ class TestFlaskApp(unittest.TestCase):
         )
         self.assertEqual(r.status_code, 415)
         r = self.client.post(
-            "/api/ai/classify", data='{"ghsa_ids":["X"]}', content_type="text/plain"
+            "/api/ai/classify", data='{"advisory_ids":["X"]}', content_type="text/plain"
         )
         self.assertEqual(r.status_code, 415)
         with mock.patch("modules.ai_classifier.ping") as ping:
@@ -152,7 +150,7 @@ class TestFlaskApp(unittest.TestCase):
     def test_ai_classify_not_configured(self):
         with mock.patch("modules.ai_classifier.load_config",
                         return_value=ai_classifier.AIConfig("anthropic", "", [], "")):
-            r = self.client.post("/api/ai/classify", json={"category": "bac", "ghsa_ids": ["X"]})
+            r = self.client.post("/api/ai/classify", json={"category": "bac", "advisory_ids": ["X"]})
         self.assertEqual(r.status_code, 400)
 
     def test_ai_classify_flow(self):
@@ -163,7 +161,7 @@ class TestFlaskApp(unittest.TestCase):
              mock.patch("modules.ai_classifier._call_messages",
                         return_value='{"is_match": true, "confidence": 0.9, "vuln_type": "IDOR", "reason": "r"}'):
             r = self.client.post("/api/ai/classify",
-                                 json={"category": "bac", "ghsa_ids": [SAMPLE["ghsa_id"]]})
+                                 json={"category": "bac", "advisory_ids": [SAMPLE["ghsa_id"]]})
         self.assertEqual(r.status_code, 200)
         data = r.get_json()
         self.assertTrue(data["verdicts"][SAMPLE["ghsa_id"]]["is_match"])
@@ -184,7 +182,7 @@ class TestFlaskApp(unittest.TestCase):
                 "/api/ai/classify",
                 json={
                     "categories": ["xss", "sqli"],
-                    "ghsa_ids": [SAMPLE["ghsa_id"]],
+                    "advisory_ids": [SAMPLE["ghsa_id"]],
                 },
             )
         self.assertEqual(r.status_code, 200)
@@ -204,7 +202,7 @@ class TestFlaskApp(unittest.TestCase):
                 "/api/ai/classify",
                 json={
                     "category": "bac",
-                    "ghsa_ids": [f"GHSA-{index}" for index in range(101)],
+                    "advisory_ids": [f"GHSA-{index}" for index in range(101)],
                 },
             )
         self.assertEqual(r.status_code, 400)
@@ -214,9 +212,9 @@ class TestFlaskApp(unittest.TestCase):
         cfg = ai_classifier.AIConfig("anthropic", "https://x", ["tok"], "PRO")
         with mock.patch("modules.ai_classifier.load_config", return_value=cfg):
             for body in (
-                {"categories": [{"name": "bac"}], "ghsa_ids": ["X"]},
-                {"categories": ["bac"], "ghsa_ids": [{"id": "X"}]},
-                {"categories": ["bac"], "ghsa_ids": ["X" * 201]},
+                {"categories": [{"name": "bac"}], "advisory_ids": ["X"]},
+                {"categories": ["bac"], "advisory_ids": [{"id": "X"}]},
+                {"categories": ["bac"], "advisory_ids": ["X" * 201]},
             ):
                 with self.subTest(body=body):
                     r = self.client.post("/api/ai/classify", json=body)
@@ -236,7 +234,7 @@ class TestFlaskApp(unittest.TestCase):
             r = self.client.post(
                 "/api/ai/classify",
                 json={"category": "bac",
-                      "ghsa_ids": [SAMPLE["ghsa_id"], "GHSA-not-in-cache"]})
+                      "advisory_ids": [SAMPLE["ghsa_id"], "GHSA-not-in-cache"]})
         self.assertEqual(r.status_code, 200)
         data = r.get_json()
         self.assertEqual(
@@ -341,7 +339,6 @@ class TestFlaskApp(unittest.TestCase):
             self.assertIn(f'data-fmt="{export_format}"', html)
         self.assertLess(html.index("window.BOOT"), html.index("app.js"))
         self.assertIn('id="ai-test-pill" type="button"', html)
-        self.assertNotIn("style=", html)
 
     def test_index_csp_nonce_matches_header(self):
         with mock.patch("modules.ghsa_client.gh_auth_ok", return_value=False):

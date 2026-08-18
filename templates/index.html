@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme="monochrome">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -40,6 +40,7 @@
       <span class="pill cache-pill" title="Advisories in the local cache">
         <span class="cache-mark" aria-hidden="true"></span><span>{{ cached_count }} CACHED</span>
       </span>
+      <button class="theme-toggle" id="theme-toggle" type="button" title="Toggle light/dark theme" aria-label="Toggle light/dark theme"></button>
     </div>
 
     <button class="filters-toggle" id="filters-toggle" type="button" aria-controls="control-panel" aria-expanded="false">
@@ -95,6 +96,9 @@
               <span class="cat-copy"><span class="source-code">NVD</span><span class="c-desc">NIST · CVSS, CPE and KEV</span></span>
               <span class="source-state" aria-hidden="true">02</span>
             </label>
+            <small class="nvd-hint" style="color:var(--text-secondary);font-size:0.75rem">
+              Without NVD_API_KEY, queries take ~7s per CWE. Get a free key at nvd.nist.gov
+            </small>
             <label class="cat" title="OSV.dev bulk export — broader coverage, filtered locally by CWE">
               <input type="checkbox" name="source" value="osv">
               <span class="cat-copy"><span class="source-code">OSV.DEV</span><span class="c-desc">Aggregated ecosystem records</span></span>
@@ -292,6 +296,16 @@
   </div>
 
   <script nonce="{{ csp_nonce }}">
+    // Apply saved theme immediately to prevent flash
+    (function() {
+      var saved = localStorage.getItem('theme');
+      if (saved === 'light' || saved === 'dark') {
+        document.documentElement.dataset.theme = saved;
+      }
+      // Set the toggle icon (updated after DOM ready below)
+    })();
+  </script>
+  <script nonce="{{ csp_nonce }}">
     window.BOOT = {
       POPULAR: {{ popular_packages|tojson }},
       SCENARIOS: {{ scenarios|tojson }},
@@ -300,5 +314,37 @@
     };
   </script>
   <script src="{{ url_for('static', filename='app.js') }}"></script>
+  <script nonce="{{ csp_nonce }}">
+    (function() {
+      var toggle = document.getElementById('theme-toggle');
+      if (!toggle) return;
+
+      function getEffectiveTheme() {
+        var explicit = document.documentElement.dataset.theme;
+        if (explicit === 'light' || explicit === 'dark') return explicit;
+        return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      }
+
+      function updateIcon() {
+        toggle.textContent = getEffectiveTheme() === 'dark' ? '☀️' : '🌙';
+        toggle.title = getEffectiveTheme() === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
+      }
+
+      toggle.addEventListener('click', function() {
+        var next = getEffectiveTheme() === 'dark' ? 'light' : 'dark';
+        document.documentElement.dataset.theme = next;
+        localStorage.setItem('theme', next);
+        updateIcon();
+        // Update meta theme-color for mobile browsers
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) meta.content = next === 'dark' ? '#080808' : '#ffffff';
+      });
+
+      // Listen for OS preference changes (only affects icon when no manual override)
+      window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', updateIcon);
+
+      updateIcon();
+    })();
+  </script>
 </body>
 </html>

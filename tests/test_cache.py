@@ -34,7 +34,7 @@ class TestCache(unittest.TestCase):
         n = ghsa.normalize(SAMPLE)
         cache.upsert_advisories([n], self.db)
         self.assertEqual(cache.count_advisories(self.db), 1)
-        got = cache.get_advisory(n["ghsa_id"], self.db)
+        got = cache.get_advisory(n["advisory_id"], self.db)
         self.assertEqual(got["cve_id"], "CVE-2026-57168")
         # upsert again -> still 1
         cache.upsert_advisories([n], self.db)
@@ -71,10 +71,10 @@ class TestCache(unittest.TestCase):
     def test_upsert_skips_bad_records_and_empty_list(self):
         cache.upsert_advisories([], self.db)  # early return, no error
         self.assertEqual(cache.count_advisories(self.db), 0)
-        # A record without ghsa_id must be silently skipped.
+        # A record without advisory_id must be silently skipped.
         cache.upsert_advisories(
             [{"cve_id": "CVE-2026-1", "severity": "high"},
-             {"ghsa_id": "GHSA-okok", "cve_id": "CVE-2026-2", "severity": "low"}],
+             {"advisory_id": "GHSA-okok", "ghsa_id": "GHSA-okok", "cve_id": "CVE-2026-2", "severity": "low"}],
             self.db,
         )
         self.assertEqual(cache.count_advisories(self.db), 1)
@@ -117,7 +117,7 @@ class TestCache(unittest.TestCase):
         """Regression: every cache function must really close its connection.
         With WAL mode, SQLite deletes the -wal/-shm sidecars when the last
         connection closes; leaked connections leave them behind."""
-        rec = {"ghsa_id": "GHSA-wal-test", "cve_id": "CVE-2026-3", "severity": "low"}
+        rec = {"advisory_id": "GHSA-wal-test", "ghsa_id": "GHSA-wal-test", "cve_id": "CVE-2026-3", "severity": "low"}
         cache.upsert_advisories([rec], self.db)
         cache.get_advisory("GHSA-wal-test", self.db)
         cache.count_advisories(self.db)

@@ -256,7 +256,8 @@ def _extract_cwes(cve: dict) -> list[str]:
 
 def _extract_cvss(cve: dict) -> tuple[float | None, str]:
     metrics = cve.get("metrics") or {}
-    for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV40"):
+    # Prefer the newest CVSS version available: v4.0 > v3.1 > v3.0 > v2.
+    for key in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30"):
         for entry in metrics.get(key) or []:
             cvss_data = entry.get("cvssData") or {}
             score = cvss_data.get("baseScore")
@@ -315,7 +316,8 @@ def normalize(vuln: dict) -> dict:
     aliases = [cve_id] if cve_id else []
 
     return {
-        "ghsa_id": cve_id,
+        "advisory_id": cve_id,
+        "ghsa_id": None,
         "cve_id": cve_id,
         "summary": (desc[:120] + "…") if len(desc) > 120 else desc,
         "description": desc,

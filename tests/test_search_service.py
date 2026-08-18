@@ -33,8 +33,14 @@ class TestParseStrList(unittest.TestCase):
 
 
 class TestParseSearchQuery(unittest.TestCase):
+    def test_empty_categories_raises(self):
+        with self.assertRaises(search_service.SearchError) as cm:
+            search_service.parse_search_query({})
+        self.assertEqual(cm.exception.status, 400)
+        self.assertIn("category", str(cm.exception).lower())
+
     def test_defaults(self):
-        q = search_service.parse_search_query({})
+        q = search_service.parse_search_query({"categories": ["bac"]})
         self.assertEqual(q.categories, ["bac"])
         self.assertEqual(q.sort, "published")
         self.assertEqual(q.direction, "desc")
@@ -47,7 +53,7 @@ class TestParseSearchQuery(unittest.TestCase):
         self.assertIn("639", q.cwes)  # resolved from bac
 
     def test_bogus_sort_and_direction_fall_back(self):
-        q = search_service.parse_search_query({"sort": "bogus", "direction": "sideways"})
+        q = search_service.parse_search_query({"categories": ["bac"], "sort": "bogus", "direction": "sideways"})
         self.assertEqual(q.sort, "published")
         self.assertEqual(q.direction, "desc")
 
@@ -55,7 +61,7 @@ class TestParseSearchQuery(unittest.TestCase):
         cases = [(0, 1), (9999, 500), ("abc", 100), ("250", 250), (-5, 1)]
         for raw, want in cases:
             with self.subTest(max_results=raw):
-                q = search_service.parse_search_query({"max_results": raw})
+                q = search_service.parse_search_query({"categories": ["bac"], "max_results": raw})
                 self.assertEqual(q.max_results, want)
 
     def test_extra_cwes_merged_without_duplicates(self):
@@ -84,7 +90,7 @@ class TestParseSearchQuery(unittest.TestCase):
         for extra_cwes in invalid_values:
             with self.subTest(extra_cwes=type(extra_cwes[0]).__name__), \
                     self.assertRaises(search_service.SearchError):
-                search_service.parse_search_query({"extra_cwes": extra_cwes})
+                search_service.parse_search_query({"categories": ["bac"], "extra_cwes": extra_cwes})
 
     def test_extra_cwes_are_canonicalized_and_deduplicated(self):
         q = search_service.parse_search_query(
@@ -100,58 +106,63 @@ class TestParseSearchQuery(unittest.TestCase):
         invalid_bodies = (
             {"categories": [{"name": "bac"}]},
             {"categories": ["b" * 65]},
-            {"sources": ["ghsa", "nvd", "osv", "osv-native", "ghsa"]},
-            {"sources": [{"name": "ghsa"}]},
+            {"categories": ["bac"], "sources": ["ghsa", "nvd", "osv", "osv-native", "ghsa"]},
+            {"categories": ["bac"], "sources": [{"name": "ghsa"}]},
         )
         for body in invalid_bodies:
             with self.subTest(body=body), self.assertRaises(search_service.SearchError):
                 search_service.parse_search_query(body)
 
     def test_sources_are_deduplicated(self):
-        q = search_service.parse_search_query({"sources": ["ghsa", "ghsa"]})
+        q = search_service.parse_search_query({"categories": ["bac"], "sources": ["ghsa", "ghsa"]})
         self.assertEqual(q.sources, ["ghsa"])
 
     def test_string_false_is_not_truthy(self):
-        q = search_service.parse_search_query({"include_extended": "false"})
+        q = search_service.parse_search_query({"categories": ["bac"], "include_extended": "false"})
         self.assertFalse(q.include_extended)
 
     def test_invalid_source_and_date_rejected(self):
         with self.assertRaises(search_service.SearchError):
-            search_service.parse_search_query({"sources": ["made-up"]})
+            search_service.parse_search_query({"categories": ["bac"], "sources": ["made-up"]})
         with self.assertRaises(search_service.SearchError):
-            search_service.parse_search_query({"published": "last Tuesday"})
+            search_service.parse_search_query({"categories": ["bac"], "published": "last Tuesday"})
         with self.assertRaises(search_service.SearchError):
-            search_service.parse_search_query({"published": "2026-02-30"})
+            search_service.parse_search_query({"categories": ["bac"], "published": "2026-02-30"})
         with self.assertRaises(search_service.SearchError):
-            search_service.parse_search_query({"ecosystem": {"unexpected": True}})
+            search_service.parse_search_query({"categories": ["bac"], "ecosystem": {"unexpected": True}})
         with self.assertRaises(search_service.SearchError):
-            search_service.parse_search_query({"extra_cwes": ["CWE-not-a-number"]})
+            search_service.parse_search_query({"categories": ["bac"], "extra_cwes": ["CWE-not-a-number"]})
 
 
 class TestMergeAdvisories(unittest.TestCase):
     def test_same_cve_prefers_ghsa_base_even_if_later(self):
-        osv_rec = {"cve_id": "CVE-2026-1", "ghsa_id": "GHSA-osvv", "source": "osv",
-                   "summary": "from osv"}
-        ghsa_rec = {"cve_id": "CVE-2026-1", "ghsa_id": "GHSA-real", "source": "ghsa",
-                    "summary": "from ghsa"}
+        osv_rec = {"advisory_id": "GHSA-osvv", "cve_id": "CVE-2026-1",
+                   "ghsa_id": "GHSA-osvv", "source": "osv", "summary": "from osv"}
+        ghsa_rec = {"advisory_id": "GHSA-real", "cve_id": "CVE-2026-1",
+                    "ghsa_id": "GHSA-real", "source": "ghsa", "summary": "from ghsa"}
         out = search_service.merge_advisories([osv_rec, ghsa_rec])
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0]["summary"], "from ghsa")  # GHSA base won
         self.assertEqual(out[0]["sources"], ["ghsa", "osv"])  # union, sorted
 
     def test_ghsa_first_keeps_ghsa_base(self):
-        ghsa_rec = {"cve_id": "CVE-2026-2", "source": "ghsa", "summary": "from ghsa"}
-        osv_rec = {"cve_id": "CVE-2026-2", "source": "osv", "summary": "from osv"}
+        ghsa_rec = {"advisory_id": "CVE-2026-2", "cve_id": "CVE-2026-2",
+                    "source": "ghsa", "summary": "from ghsa"}
+        osv_rec = {"advisory_id": "CVE-2026-2", "cve_id": "CVE-2026-2",
+                   "source": "osv", "summary": "from osv"}
         out = search_service.merge_advisories([ghsa_rec, osv_rec])
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0]["summary"], "from ghsa")
         self.assertEqual(out[0]["sources"], ["ghsa", "osv"])
 
     def test_keyless_record_kept_and_order_preserved(self):
-        rec_x = {"cve_id": "CVE-2026-3", "source": "ghsa", "summary": "x"}
+        rec_x = {"advisory_id": "CVE-2026-3", "cve_id": "CVE-2026-3",
+                 "source": "ghsa", "summary": "x"}
         keyless = {"summary": "no ids at all"}
-        rec_y = {"cve_id": "CVE-2026-4", "source": "osv", "summary": "y"}
-        dup_x = {"cve_id": "CVE-2026-3", "source": "osv", "summary": "x-osv"}
+        rec_y = {"advisory_id": "CVE-2026-4", "cve_id": "CVE-2026-4",
+                 "source": "osv", "summary": "y"}
+        dup_x = {"advisory_id": "CVE-2026-3", "cve_id": "CVE-2026-3",
+                 "source": "osv", "summary": "x-osv"}
         out = search_service.merge_advisories([rec_x, keyless, rec_y, dup_x])
         self.assertEqual([r["summary"] for r in out], ["x", "no ids at all", "y"])
         self.assertEqual(out[0]["sources"], ["ghsa", "osv"])
@@ -159,13 +170,15 @@ class TestMergeAdvisories(unittest.TestCase):
 
     def test_merge_preserves_complementary_metadata(self):
         nvd = {
-            "ghsa_id": "CVE-2026-55", "cve_id": "CVE-2026-55", "source": "nvd",
+            "advisory_id": "CVE-2026-55", "ghsa_id": None,
+            "cve_id": "CVE-2026-55", "source": "nvd",
             "severity": "critical", "cvss_score": 9.8, "cwes": ["89"],
             "references": ["https://nvd.example"], "packages": [], "ecosystems": [],
             "kev": True, "nvd_status": "Analyzed",
         }
         ghsa = {
-            "ghsa_id": "GHSA-bridge", "cve_id": "CVE-2026-55", "source": "ghsa",
+            "advisory_id": "GHSA-bridge", "ghsa_id": "GHSA-bridge",
+            "cve_id": "CVE-2026-55", "source": "ghsa",
             "severity": "high", "cvss_score": 8.1, "cwes": ["CWE-89"],
             "references": ["https://ghsa.example"], "packages": [], "ecosystems": [],
         }
@@ -180,10 +193,13 @@ class TestMergeAdvisories(unittest.TestCase):
 
     def test_alias_graph_bridge_merges_all_records(self):
         records = [
-            {"ghsa_id": "GHSA-one", "aliases": ["CVE-2026-77"], "source": "ghsa"},
-            {"osv_id": "GO-2026-1", "ghsa_id": "GO-2026-1",
+            {"advisory_id": "GHSA-one", "ghsa_id": "GHSA-one",
+             "aliases": ["CVE-2026-77"], "source": "ghsa"},
+            {"advisory_id": "GO-2026-1", "osv_id": "GO-2026-1",
+             "ghsa_id": "GO-2026-1",
              "aliases": ["CVE-2026-77", "RUSTSEC-2026-1"], "source": "osv"},
-            {"osv_id": "RUSTSEC-2026-1", "ghsa_id": "RUSTSEC-2026-1", "source": "osv"},
+            {"advisory_id": "RUSTSEC-2026-1", "osv_id": "RUSTSEC-2026-1",
+             "ghsa_id": "RUSTSEC-2026-1", "source": "osv"},
         ]
         merged = search_service.merge_advisories(records)
         self.assertEqual(len(merged), 1)
@@ -207,6 +223,7 @@ class TestRunSearch(unittest.TestCase):
                 pass
 
     def _run(self, body):
+        body.setdefault("categories", ["bac"])
         q = search_service.parse_search_query(body)
         with mock.patch("modules.ghsa_client.fetch_advisories",
                         return_value=make_sortable_raw()):
@@ -238,7 +255,7 @@ class TestRunSearch(unittest.TestCase):
                          [SORT_C, SORT_A, SORT_B])
 
     def test_common_filters_are_enforced_after_normalization(self):
-        q = search_service.parse_search_query({"published": ">=2099-01-01"})
+        q = search_service.parse_search_query({"categories": ["bac"], "published": ">=2099-01-01"})
         with mock.patch(
             "modules.ghsa_client.fetch_advisories", return_value=make_sortable_raw()
         ):
@@ -246,7 +263,7 @@ class TestRunSearch(unittest.TestCase):
         self.assertEqual(out.results, [])
 
     def test_ghsa_only_failure_is_502(self):
-        q = search_service.parse_search_query({})  # sources == ["ghsa"]
+        q = search_service.parse_search_query({"categories": ["bac"]})  # sources == ["ghsa"]
         with mock.patch("modules.ghsa_client.fetch_advisories",
                         side_effect=ghsa.GhCliError("nope")):
             with self.assertRaises(search_service.SearchError) as cm:
@@ -255,7 +272,7 @@ class TestRunSearch(unittest.TestCase):
 
     def test_ghsa_failure_with_other_sources_is_warning(self):
         q = search_service.parse_search_query(
-            {"sources": ["ghsa", "osv"], "ecosystem": "go"})
+            {"categories": ["bac"], "sources": ["ghsa", "osv"], "ecosystem": "go"})
         with mock.patch("modules.ghsa_client.fetch_advisories",
                         side_effect=ghsa.GhCliError("nope")), \
              mock.patch("modules.osv_client.fetch_osv", return_value=[]):

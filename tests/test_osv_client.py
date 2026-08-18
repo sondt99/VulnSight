@@ -24,6 +24,7 @@ from samples import OSV_GHSA, OSV_NATIVE, make_osv_zip
 class TestNormalizeOsv(unittest.TestCase):
     def test_normalize_ghsa_sourced(self):
         n = osv_client.normalize_osv(OSV_GHSA)
+        self.assertEqual(n["advisory_id"], "GHSA-xr65-5cpm-g36x")
         self.assertEqual(n["ghsa_id"], "GHSA-xr65-5cpm-g36x")
         self.assertEqual(n["cve_id"], "CVE-2026-11122")
         self.assertEqual(n["cwes"], ["CWE-863"])
@@ -34,6 +35,7 @@ class TestNormalizeOsv(unittest.TestCase):
 
     def test_normalize_native(self):
         n = osv_client.normalize_osv(OSV_NATIVE)
+        self.assertEqual(n["advisory_id"], "GO-2023-1737")  # no GHSA alias -> keeps OSV id
         self.assertEqual(n["ghsa_id"], "GO-2023-1737")  # no GHSA alias -> keeps OSV id
         self.assertEqual(n["cve_id"], "CVE-2023-29401")
         self.assertEqual(n["cwes"], [])

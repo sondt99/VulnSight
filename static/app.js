@@ -1,10 +1,12 @@
+// === Configuration & State ===
 const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
     const $ = (s) => document.querySelector(s);
     const $$ = (s) => Array.from(document.querySelectorAll(s));
     let LAST = [];           // last result set (normalized advisories)
-    let AI = {};             // ghsa_id -> verdict
+    let AI = {};             // advisory_id -> verdict
     let filterReturnFocus = null;
 
+    // === DOM Helpers ===
     function setResultsBusy(busy) {
       $('#results').setAttribute('aria-busy', String(Boolean(busy)));
     }
@@ -27,7 +29,7 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       return $$('input[name=category]:checked').map(c => c.value);
     }
 
-    // --- Package suggestions driven by the chosen ecosystem -----------------
+    // === Package Suggestions ===
     function refreshPackages() {
       const eco = $('#ecosystem').value;
       const list = POPULAR[eco] || [];
@@ -38,7 +40,7 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       if (list.includes(prev)) sel.value = prev;
     }
 
-    // --- Published preset -> GitHub advisory date filter --------------------
+    // === Search & Filters ===
     function publishedFilter() {
       const v = $('#published').value;
       if (!v || v === 'any') return '';
@@ -49,7 +51,6 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       return '>=' + d.toISOString().slice(0,10);
     }
 
-    // --- Extra CWE tick-list ------------------------------------------------
     function selectedExtraCwes() {
       return $$('input[name=extra_cwe]:checked').map(c => c.value);
     }
@@ -58,7 +59,6 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       $('#extra_cwes_count').textContent = n ? (n + ' CWE' + (n>1?'s':'')) : 'none';
     }
 
-    // --- Apply a ready-made scenario ---------------------------------------
     function applyScenario(key) {
       const s = SCENARIOS.find(x => x.key === key);
       if (!s) return;
@@ -80,7 +80,11 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
     }
 
     function esc(s) {
-      return String(s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+      return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    function safeAttr(s) {
+      return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     }
 
     function safeUrl(value) {
@@ -96,8 +100,9 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       return {critical:4, high:3, medium:2, low:1, unknown:0}[s] || 0;
     }
 
+    // === Rendering ===
     function renderCard(a) {
-      const v = AI[a.ghsa_id] || a.ai;
+      const v = AI[a.advisory_id] || a.ai;
       let aiHtml = '';
       if (v) {
         if (v.error) {
@@ -140,7 +145,7 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
         ? `<span class="badge badge--withdrawn" title="Withdrawn at ${esc(a.withdrawn_at)}">WITHDRAWN</span>` : '';
       const kevBadge = a.kev
         ? `<span class="badge badge--kev" title="CISA Known Exploited Vulnerability">KEV / EXPLOITED</span>` : '';
-      return `<article class="card ${sevbar} ${dimClass}" data-id="${esc(a.ghsa_id)}">
+      return `<article class="card ${sevbar} ${dimClass}" data-id="${esc(a.advisory_id)}">
         <div class="card-top">
           <h3 class="title">${esc(a.summary)}</h3>
           <span class="badge sev ${safeSeverity}">${esc(a.severity)}</span>
@@ -152,7 +157,7 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
         </div>
         <div class="badges">${pkgs}${morePkgs}</div>
         <div class="meta">
-          <span><span class="meta-label">Advisory</span><a href="${safeUrl(a.html_url)}" target="_blank" rel="noopener noreferrer">${esc(a.ghsa_id)}</a></span>
+          <span><span class="meta-label">Advisory</span><a href="${safeUrl(a.html_url)}" target="_blank" rel="noopener noreferrer">${esc(a.ghsa_id || a.advisory_id)}</a></span>
           <span><span class="meta-label">CVE</span>${cve}</span>
           <span><span class="meta-label">Published</span><time datetime="${esc((a.published_at||'').slice(0,10))}">${esc((a.published_at||'').slice(0,10))}</time></span>
           ${a.cvss_score ? '<span><span class="meta-label">CVSS</span>'+esc(a.cvss_score)+'</span>' : ''}
@@ -166,13 +171,13 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       let items = LAST.slice();
       if ($('#only_match').checked) {
         items = items.filter(a => {
-          const v = AI[a.ghsa_id] || a.ai;
+          const v = AI[a.advisory_id] || a.ai;
           return v && v.is_match === true;
         });
       }
       // Sort: AI match first (by confidence), then severity, then date.
       items.sort((x, y) => {
-        const vx = AI[x.ghsa_id]||x.ai, vy = AI[y.ghsa_id]||y.ai;
+        const vx = AI[x.advisory_id]||x.ai, vy = AI[y.advisory_id]||y.ai;
         const mx = vx && vx.is_match ? (vx.confidence||0)+1 : 0;
         const my = vy && vy.is_match ? (vy.confidence||0)+1 : 0;
         if (my !== mx) return my - mx;
@@ -184,7 +189,7 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
     }
 
     function failedIds() {
-      return LAST.map(a => a.ghsa_id).filter(id => AI[id] && (AI[id].error || AI[id].has_errors));
+      return LAST.map(a => a.advisory_id).filter(id => AI[id] && (AI[id].error || AI[id].has_errors));
     }
 
     function updateActionButtons() {
@@ -258,7 +263,7 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
         if (!r.ok) throw new Error(data.error || 'search failed');
         LAST = data.results;
         AI = {};
-        LAST.forEach(a => { if (a.ai) AI[a.ghsa_id] = a.ai; });
+        LAST.forEach(a => { if (a.ai) AI[a.advisory_id] = a.ai; });
         const cached = LAST.filter(a => a.ai).length;
         const ps = data.query.per_source || {};
         const psText = Object.keys(ps).length ? ' · ' + Object.entries(ps).map(([k,v]) => `${k.toUpperCase()}:${v}`).join(' + ') : '';
@@ -279,6 +284,7 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       }
     }
 
+    // === AI Classification ===
     // One classify request for a set of ids. Merges verdicts into AI and
     // returns the number of results that came back as errors.
     async function classifyIds(ids) {
@@ -287,7 +293,7 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       for (let offset = 0; offset < ids.length; offset += 100) {
         const batch = ids.slice(offset, offset + 100);
         const r = await fetch('/api/ai/classify', {method:'POST', headers:{'content-type':'application/json'},
-          body: JSON.stringify({categories: cats.length ? cats : ['bac'], ghsa_ids: batch})});
+          body: JSON.stringify({categories: cats.length ? cats : ['bac'], advisory_ids: batch})});
         const data = await r.json();
         if (!r.ok) throw new Error(data.error || 'AI failed');
         Object.assign(AI, data.verdicts);
@@ -297,7 +303,7 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
 
     async function refineAI() {
       if (!LAST.length) return;
-      const ids = LAST.map(a => a.ghsa_id);
+      const ids = LAST.map(a => a.advisory_id);
       $('#ai-btn').disabled = true;
       $('#retry-btn').disabled = true;
       setResultsBusy(true);
@@ -317,7 +323,7 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
           await classifyIds(fails);
           render();
         }
-        const matches = LAST.filter(a => (AI[a.ghsa_id]||{}).is_match).length;
+        const matches = LAST.filter(a => (AI[a.advisory_id]||{}).is_match).length;
         const errs = failedIds().length;
         toast(`AI done: ${matches} matches` + (errs ? `, ${errs} still failing — use ↻ Retry failed` : ''),
               errs ? 'err' : 'ok');
@@ -370,18 +376,19 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
     function unscoredCount() {
       const cats = selectedCategories();
       return LAST.filter(a => {
-        const verdict = AI[a.ghsa_id] || a.ai;
+        const verdict = AI[a.advisory_id] || a.ai;
         if (!verdict) return true;
         const scored = verdict.scored_categories || [];
         return cats.some(category => !scored.includes(category));
       }).length;
     }
 
-    // --- Export -------------------------------------------------------------
+    // === Export ===
     function flatRow(a) {
-      const v = AI[a.ghsa_id] || a.ai || {};
+      const v = AI[a.advisory_id] || a.ai || {};
       return {
-        ghsa_id: a.ghsa_id,
+        advisory_id: a.advisory_id,
+        ghsa_id: a.ghsa_id || '',
         cve_id: a.cve_id || '',
         sources: (a.sources || [a.source]).filter(Boolean).join('|'),
         severity: a.severity || '',
@@ -424,11 +431,11 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
     }
     function doExport(fmt) {
       let items = currentItems();
-      if (fmt === 'csv-matches') items = items.filter(a => (AI[a.ghsa_id]||a.ai||{}).is_match === true);
+      if (fmt === 'csv-matches') items = items.filter(a => (AI[a.advisory_id]||a.ai||{}).is_match === true);
       if (!items.length) { toast('Nothing to export', 'err'); return; }
       const rows = items.map(flatRow);
       if (fmt === 'json') {
-        const full = items.map(a => ({...a, ai: AI[a.ghsa_id] || a.ai || null}));
+        const full = items.map(a => ({...a, ai: AI[a.advisory_id] || a.ai || null}));
         download(`vulnerability-advisories-${stamp()}.json`, JSON.stringify(full, null, 2), 'application/json');
       } else {
         const cols = Object.keys(rows[0]);
@@ -439,6 +446,7 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       toast(`Exported ${items.length} advisory(ies) as ${fmt.startsWith('csv')?'CSV':'JSON'}`, 'ok');
     }
 
+    // === Auto Pipeline ===
     function setSources(list) {
       $$('input[name=source]').forEach(c => { c.checked = list.includes(c.value); });
     }
@@ -477,6 +485,7 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       }
     }
 
+    // === Event Listeners ===
     $('#auto-btn').addEventListener('click', autoRun);
     $('#search-btn').addEventListener('click', search);
     $('#ai-btn').addEventListener('click', refineAI);
