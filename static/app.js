@@ -145,13 +145,24 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
         ? `<span class="badge badge--withdrawn" title="Withdrawn at ${esc(a.withdrawn_at)}">WITHDRAWN</span>` : '';
       const kevBadge = a.kev
         ? `<span class="badge badge--kev" title="CISA Known Exploited Vulnerability">KEV / EXPLOITED</span>` : '';
+      const epssPct = Number(a.epss_percentage);
+      const epssBar = Number.isFinite(epssPct)
+        ? `<span class="badge badge--epss" title="EPSS exploit probability">EPSS ${(epssPct * 100).toFixed(2)}%</span>`
+        : '';
+      const epssMeta = Number.isFinite(epssPct)
+        ? `<span class="epss-meter" title="EPSS exploit probability${Number.isFinite(Number(a.epss_percentile)) ? ' · percentile ' + Math.round(Number(a.epss_percentile) * 100) : ''}">
+            <span class="meta-label">EPSS</span>
+            <progress max="100" value="${Math.min(100, Math.max(0, epssPct * 100))}" aria-label="EPSS ${(epssPct * 100).toFixed(2)}%"></progress>
+            ${(epssPct * 100).toFixed(2)}%${Number.isFinite(Number(a.epss_percentile)) ? ' · p' + Math.round(Number(a.epss_percentile) * 100) : ''}
+          </span>`
+        : '';
       return `<article class="card ${sevbar} ${dimClass}" data-id="${esc(a.advisory_id)}">
         <div class="card-top">
           <h3 class="title">${esc(a.summary)}</h3>
           <span class="badge sev ${safeSeverity}">${esc(a.severity)}</span>
         </div>
         <div class="badges">
-          ${srcBadge}${nativeBadge}${kevBadge}${withdrawnBadge}
+          ${srcBadge}${nativeBadge}${kevBadge}${withdrawnBadge}${epssBar}
           <span class="badge eco">${esc((a.ecosystems||[]).join(', ')||'—')}</span>
           ${cwes}
         </div>
@@ -161,6 +172,7 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
           <span><span class="meta-label">CVE</span>${cve}</span>
           <span><span class="meta-label">Published</span><time datetime="${esc((a.published_at||'').slice(0,10))}">${esc((a.published_at||'').slice(0,10))}</time></span>
           ${a.cvss_score ? '<span><span class="meta-label">CVSS</span>'+esc(a.cvss_score)+'</span>' : ''}
+          ${epssMeta}
         </div>
         ${aiHtml}
       </article>`;
@@ -175,15 +187,28 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
           return v && v.is_match === true;
         });
       }
-      // Sort: AI match first (by confidence), then severity, then date.
+      // AI-confirmed matches stay at the top; otherwise honour the selected sort.
+      const sort = $('#sort').value;
+      const dir = $('#direction').value === 'asc' ? 1 : -1;
       items.sort((x, y) => {
         const vx = AI[x.advisory_id]||x.ai, vy = AI[y.advisory_id]||y.ai;
         const mx = vx && vx.is_match ? (vx.confidence||0)+1 : 0;
         const my = vy && vy.is_match ? (vy.confidence||0)+1 : 0;
         if (my !== mx) return my - mx;
-        const sr = severityRank(y.severity) - severityRank(x.severity);
-        if (sr) return sr;
-        return (y.published_at||'').localeCompare(x.published_at||'');
+        let cmp = 0;
+        if (sort === 'cve_id') {
+          cmp = (x.cve_id || '').localeCompare(y.cve_id || '');
+        } else if (sort === 'updated') {
+          cmp = (x.updated_at || '').localeCompare(y.updated_at || '');
+        } else if (sort === 'epss_percentage') {
+          cmp = (Number(x.epss_percentage) || 0) - (Number(y.epss_percentage) || 0);
+        } else if (sort === 'epss_percentile') {
+          cmp = (Number(x.epss_percentile) || 0) - (Number(y.epss_percentile) || 0);
+        } else {
+          cmp = (x.published_at || '').localeCompare(y.published_at || '');
+        }
+        if (cmp) return cmp * dir;
+        return severityRank(y.severity) - severityRank(x.severity);
       });
       return items;
     }
@@ -202,7 +227,7 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       const nfail = failedIds().length;
       const rb = $('#retry-btn');
       rb.disabled = nfail === 0;
-      rb.textContent = nfail ? `↻ Retry failed (${nfail})` : '↻ Retry failed';
+      rb.textContent = nfail ? `Retry failed (${nfail})` : 'Retry failed';
     }
 
     function render() {
@@ -223,7 +248,7 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       if (document.body.classList.contains('filters-open')) setFilterPanel(false, false);
       $('#search-btn').disabled = true;
       setResultsBusy(true);
-      $('#results').innerHTML = `<div class="loading"><span class="spinner"></span>Opening intelligence sources…</div>`;
+      $('#results').innerHTML = `<div class="loading"><span class="spinner"></span>Searching advisories…</div>`;
       $('#summary').textContent = 'Searching…';
       const sources = $$('input[name=source]:checked').map(c => c.value);
       if (!sources.length) {
@@ -409,6 +434,8 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
         withdrawn_at: a.withdrawn_at || '',
         url: a.html_url || '',
         summary: a.summary || '',
+        epss: a.epss_percentage != null ? a.epss_percentage : '',
+        epss_percentile: a.epss_percentile != null ? a.epss_percentile : '',
       };
     }
     function download(name, text, mime) {
@@ -504,6 +531,8 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
     $('#filters-close').addEventListener('click', () => setFilterPanel(false));
     $('#filter-scrim').addEventListener('click', () => setFilterPanel(false));
     $('#ecosystem').addEventListener('change', refreshPackages);
+    $('#sort').addEventListener('change', () => { if (LAST.length) render(); });
+    $('#direction').addEventListener('change', () => { if (LAST.length) render(); });
     $('#scenario').addEventListener('change', e => applyScenario(e.target.value));
     $$('input[name=extra_cwe]').forEach(c => c.addEventListener('change', updateExtraCount));
     $$('.export-pop button').forEach(b => b.addEventListener('click', () => doExport(b.dataset.fmt)));

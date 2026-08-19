@@ -254,6 +254,21 @@ class TestRunSearch(unittest.TestCase):
         self.assertEqual([r["ghsa_id"] for r in out.results],
                          [SORT_C, SORT_A, SORT_B])
 
+    def test_sort_epss_handles_missing_scores(self):
+        """Records without EPSS used to crash sort (float vs '')."""
+        body = {"categories": ["bac"], "sort": "epss_percentage"}
+        q = search_service.parse_search_query(body)
+        scores = {
+            "CVE-2026-0002": {"epss": 0.9, "percentile": 0.99},
+            "CVE-2026-0001": {"epss": 0.1, "percentile": 0.4},
+        }
+        with mock.patch("modules.ghsa_client.fetch_advisories",
+                        return_value=make_sortable_raw()), \
+             mock.patch("modules.epss_client.fetch_epss", return_value=scores):
+            out = search_service.run_search(q)
+        ids = [r["ghsa_id"] for r in out.results]
+        self.assertEqual(ids, [SORT_A, SORT_C, SORT_B])
+
     def test_common_filters_are_enforced_after_normalization(self):
         q = search_service.parse_search_query({"categories": ["bac"], "published": ">=2099-01-01"})
         with mock.patch(

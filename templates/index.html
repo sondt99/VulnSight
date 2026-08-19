@@ -3,27 +3,25 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#080808">
-  <meta name="description" content="VulnSight turns multi-source security advisories into a focused, AI-assisted vulnerability queue.">
-  <title>VulnSight — Vulnerability Intelligence</title>
+  <meta name="theme-color" content="#0b1218">
+  <meta name="description" content="VulnSight searches GHSA, NVD and OSV by bug class (CWE), then optionally confirms matches with an LLM.">
+  <title>VulnSight — advisory search by bug class</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
   <a class="skip-link" href="#results">Skip to advisory results</a>
-  <div class="ambient-grid" aria-hidden="true"></div>
 
   <header class="topbar">
     <a class="brand" href="/" aria-label="VulnSight home">
-      <span class="logo" aria-hidden="true"><span>VS</span></span>
+      <span class="logo" aria-hidden="true">VS</span>
       <span class="brand-copy">
-        <span class="brand-eyebrow">VULNERABILITY / INTELLIGENCE</span>
         <span class="brand-name">VulnSight</span>
-        <span class="brand-sub">Track. Triage. Verify.</span>
+        <span class="brand-sub">Advisory search by CWE</span>
       </span>
     </a>
 
     <div class="system-status" aria-label="System status">
-      <span class="status-title">SYSTEM</span>
+      <span class="status-title">STATUS</span>
       <span class="pill">
         <span class="dot {{ 'ok' if gh_ok else 'bad' }}" aria-hidden="true"></span>
         <span class="pill-key">GH</span>
@@ -34,13 +32,14 @@
         <span class="pill-key">AI</span>
         <span class="pill-value">{{ 'READY' if ai_configured else 'OFF' }}</span>
       </span>
-      <button class="pill pill-action" id="ai-test-pill" type="button" title="Test the configured AI endpoint">
-        <span class="pulse-mark" aria-hidden="true">↯</span><span>TEST AI</span>
-      </button>
+      <button class="pill pill-action" id="ai-test-pill" type="button" title="Test the configured AI endpoint">Test AI</button>
       <span class="pill cache-pill" title="Advisories in the local cache">
-        <span class="cache-mark" aria-hidden="true"></span><span>{{ cached_count }} CACHED</span>
+        <span class="cache-mark" aria-hidden="true"></span>
+        <span>{{ cached_count }} cached</span>
       </span>
-      <button class="theme-toggle" id="theme-toggle" type="button" title="Toggle light/dark theme" aria-label="Toggle light/dark theme"></button>
+      <button class="theme-toggle" id="theme-toggle" type="button" title="Toggle light/dark theme" aria-label="Toggle light/dark theme">
+        <span class="theme-icon" aria-hidden="true"></span>
+      </button>
     </div>
 
     <button class="filters-toggle" id="filters-toggle" type="button" aria-controls="control-panel" aria-expanded="false">
@@ -51,27 +50,28 @@
   <button class="filter-scrim" id="filter-scrim" type="button" aria-label="Close filters" tabindex="-1"></button>
 
   <div class="layout">
-    <aside class="control-rail" id="control-panel" aria-label="Vulnerability query filters">
+    <aside class="control-rail" id="control-panel" aria-label="Search filters">
       <div class="rail-intro">
         <div>
-          <span class="eyebrow">01 / QUERY CONSOLE</span>
-          <h2>Build the signal.</h2>
-          <p>Narrow the global advisory feed into a queue worth investigating.</p>
+          <span class="eyebrow">Query</span>
+          <h2>Build a search</h2>
+          <p>Filter GHSA, NVD and OSV by bug class, ecosystem and package. Optionally confirm matches with AI.</p>
         </div>
         <button class="rail-close" id="filters-close" type="button" aria-label="Close filters">×</button>
         <div class="rail-stats" aria-label="Available search dimensions">
-          <span><b>04</b> sources</span>
-          <span><b>{{ categories|length }}</b> bug classes</span>
-          <span><b>AI</b> scoring</span>
+          <span><b>4</b> sources</span>
+          <span><b>{{ categories|length }}</b> classes</span>
+          <span><b>{{ cached_count }}</b> cached</span>
         </div>
       </div>
 
       <section class="control-section" aria-labelledby="preset-heading">
         <div class="section-heading">
-          <span class="section-index">01</span><h3 id="preset-heading">Preset</h3><span class="section-note">Fast start</span>
+          <h3 id="preset-heading">Preset</h3>
+          <span class="section-note">Fast start</span>
         </div>
         <div class="field field-last">
-          <label for="scenario">Quick scenario <span class="hint">fills the query</span></label>
+          <label for="scenario">Scenario <span class="hint">fills the form</span></label>
           <select id="scenario">
             <option value="">— pick a preset —</option>
             {% for s in scenarios %}<option value="{{ s.key }}">{{ s.label }}</option>{% endfor %}
@@ -81,33 +81,28 @@
 
       <section class="control-section" aria-labelledby="sources-heading">
         <div class="section-heading">
-          <span class="section-index">02</span><h3 id="sources-heading">Intelligence sources</h3><span class="section-note">Coverage</span>
+          <h3 id="sources-heading">Sources</h3>
+          <span class="section-note">Coverage</span>
         </div>
         <fieldset class="field field-last">
           <legend class="sr-only">Choose data sources</legend>
           <div class="cats source-list">
             <label class="cat" title="GitHub Advisory Database — server-side CWE filter, any ecosystem">
               <input type="checkbox" name="source" value="ghsa" checked>
-              <span class="cat-copy"><span class="source-code">GHSA</span><span class="c-desc">GitHub · direct CWE filtering</span></span>
-              <span class="source-state" aria-hidden="true">01</span>
+              <span class="cat-copy"><span class="source-code">GHSA</span><span class="c-desc">GitHub · CWE filter</span></span>
             </label>
             <label class="cat" title="NIST National Vulnerability Database — CWE filter, CVSS v3/v4, CPE, KEV">
               <input type="checkbox" name="source" value="nvd">
-              <span class="cat-copy"><span class="source-code">NVD</span><span class="c-desc">NIST · CVSS, CPE and KEV</span></span>
-              <span class="source-state" aria-hidden="true">02</span>
+              <span class="cat-copy"><span class="source-code">NVD</span><span class="c-desc">NIST · CVSS, CPE, KEV</span></span>
             </label>
-            <small class="nvd-hint" style="color:var(--text-secondary);font-size:0.75rem">
-              Without NVD_API_KEY, queries take ~7s per CWE. Get a free key at nvd.nist.gov
-            </small>
+            <p class="nvd-hint">Without NVD_API_KEY, queries take ~7s per CWE. Free key at nvd.nist.gov</p>
             <label class="cat" title="OSV.dev bulk export — broader coverage, filtered locally by CWE">
               <input type="checkbox" name="source" value="osv">
-              <span class="cat-copy"><span class="source-code">OSV.DEV</span><span class="c-desc">Aggregated ecosystem records</span></span>
-              <span class="source-state" aria-hidden="true">03</span>
+              <span class="cat-copy"><span class="source-code">OSV</span><span class="c-desc">Bulk export · local CWE filter</span></span>
             </label>
             <label class="cat" title="OSV source-native records without a CWE tag — classified by AI">
               <input type="checkbox" name="source" value="osv-native">
-              <span class="cat-copy"><span class="source-code">OSV NATIVE</span><span class="c-desc">No-CWE records · AI-assisted</span></span>
-              <span class="source-state" aria-hidden="true">04</span>
+              <span class="cat-copy"><span class="source-code">OSV native</span><span class="c-desc">No CWE · AI-assisted</span></span>
             </label>
           </div>
           <label class="check advanced-check" title="Re-download the OSV bulk export even if cached">
@@ -119,7 +114,8 @@
 
       <section class="control-section" aria-labelledby="classes-heading">
         <div class="section-heading">
-          <span class="section-index">03</span><h3 id="classes-heading">Threat taxonomy</h3><span class="section-note">CWE map</span>
+          <h3 id="classes-heading">Bug class</h3>
+          <span class="section-note">CWE map</span>
         </div>
         <fieldset class="field">
           <legend class="sr-only">Choose vulnerability classes</legend>
@@ -128,7 +124,6 @@
             <label class="cat taxonomy-item">
               <input type="checkbox" name="category" value="{{ c.key }}" {{ 'checked' if c.key == 'bac' else '' }}>
               <span class="cat-copy"><span class="c-label">{{ c.label }}</span><span class="c-desc">{{ c.description }}</span></span>
-              <span class="select-mark" aria-hidden="true"></span>
             </label>
             {% endfor %}
           </div>
@@ -137,7 +132,7 @@
         <div class="field compact-field">
           <label class="check switch-check">
             <input type="checkbox" id="include_extended" checked>
-            <span><span class="check-title">Include extended CWEs</span><span class="hint">Higher recall · more noise</span></span>
+            <span><span class="check-title">Include extended CWEs</span><span class="hint">Higher recall, more noise</span></span>
           </label>
         </div>
 
@@ -161,7 +156,8 @@
 
       <section class="control-section" aria-labelledby="scope-heading">
         <div class="section-heading">
-          <span class="section-index">04</span><h3 id="scope-heading">Target scope</h3><span class="section-note">Environment</span>
+          <h3 id="scope-heading">Scope</h3>
+          <span class="section-note">Target</span>
         </div>
         <div class="row">
           <div class="field">
@@ -187,90 +183,112 @@
 
       <section class="control-section" aria-labelledby="query-heading">
         <div class="section-heading">
-          <span class="section-index">05</span><h3 id="query-heading">Query options</h3><span class="section-note">Retrieval</span>
+          <h3 id="query-heading">Options</h3>
+          <span class="section-note">Retrieval</span>
         </div>
         <div class="row">
           <div class="field">
             <label for="published">Published</label>
             <select id="published">
-              <option value="any" selected>Any time</option><option value="7d">Last 7 days</option>
-              <option value="30d">Last 30 days</option><option value="90d">Last 90 days</option>
-              <option value="180d">Last 6 months</option><option value="1y">Last year</option>
-              <option value="2y">Last 2 years</option><option value="2020">Since 2020</option>
+              <option value="any" selected>Any time</option>
+              <option value="7d">Last 7 days</option>
+              <option value="30d">Last 30 days</option>
+              <option value="90d">Last 90 days</option>
+              <option value="180d">Last 6 months</option>
+              <option value="1y">Last year</option>
+              <option value="2y">Last 2 years</option>
+              <option value="2020">Since 2020</option>
             </select>
           </div>
           <div class="field">
             <label for="max_results">Max results</label>
             <select id="max_results">
-              <option value="25">25</option><option value="50">50</option><option value="100" selected>100</option>
-              <option value="200">200</option><option value="500">500</option>
+              <option value="25">25</option>
+              <option value="50">50</option>
+              <option value="100" selected>100</option>
+              <option value="200">200</option>
+              <option value="500">500</option>
             </select>
           </div>
         </div>
         <div class="row">
           <div class="field">
             <label for="sort">Sort by</label>
-            <select id="sort"><option value="published" selected>Published</option><option value="updated">Updated</option><option value="cve_id">CVE ID</option></select>
+            <select id="sort">
+              <option value="published" selected>Published</option>
+              <option value="updated">Updated</option>
+              <option value="cve_id">CVE ID</option>
+              <option value="epss_percentage">EPSS score</option>
+              <option value="epss_percentile">EPSS percentile</option>
+            </select>
           </div>
           <div class="field">
             <label for="direction">Order</label>
-            <select id="direction"><option value="desc" selected>Newest first</option><option value="asc">Oldest first</option></select>
+            <select id="direction">
+              <option value="desc" selected>Newest first</option>
+              <option value="asc">Oldest first</option>
+            </select>
           </div>
         </div>
         <div class="field field-last">
           <label for="type">Advisory type</label>
-          <select id="type"><option value="reviewed" selected>Reviewed</option><option value="unreviewed">Unreviewed</option><option value="malware">Malware</option></select>
+          <select id="type">
+            <option value="reviewed" selected>Reviewed</option>
+            <option value="unreviewed">Unreviewed</option>
+            <option value="malware">Malware</option>
+          </select>
         </div>
       </section>
 
       <div class="control-actions">
         <button class="primary" id="auto-btn" type="button" title="Pick optimal sources, search, run AI, and show only real matches">
-          <span class="button-kicker">FULL PIPELINE</span><span class="button-main">Run intelligent scan <span aria-hidden="true">↗</span></span>
+          <span class="button-kicker">Full pipeline</span>
+          <span class="button-main">Run intelligent scan</span>
         </button>
         <button class="secondary-action" id="search-btn" type="button" title="Fetch advisories without AI classification">
           <span>Search raw advisories</span><kbd>⌘ ↵</kbd>
         </button>
-        <p class="action-note"><span aria-hidden="true">◆</span> Auto selects sources, searches, scores and isolates confirmed matches.</p>
+        <p class="action-note">Auto picks sources, searches, scores with AI, then keeps confirmed matches.</p>
       </div>
     </aside>
 
     <main class="workspace" id="workspace">
       <section class="workspace-intro" aria-labelledby="workspace-title">
         <div class="workspace-heading">
-          <span class="eyebrow">02 / LIVE INTELLIGENCE INDEX</span>
-          <h2 id="workspace-title">Threat<br><em>ledger.</em></h2>
-          <p>Cross-source vulnerability intelligence, shaped into one defensible investigation queue.</p>
+          <span class="eyebrow">Results</span>
+          <h2 id="workspace-title">Advisory queue</h2>
+          <p>Merged records from GHSA, NVD and OSV, ranked for triage. Confirm with AI when CWE tags are too broad.</p>
         </div>
-        <div class="threat-key" aria-label="Severity signal key">
-          <div class="threat-key-head"><span>SIGNAL KEY</span><span>CVSS / NORMALIZED</span></div>
+        <div class="threat-key" aria-label="Severity key">
+          <div class="threat-key-head"><span>Severity</span><span>CVSS</span></div>
           <div class="threat-scale">
-            <span class="threat-level critical"><i aria-hidden="true"></i><b>CRITICAL</b><small>9.0–10</small></span>
-            <span class="threat-level high"><i aria-hidden="true"></i><b>HIGH</b><small>7.0–8.9</small></span>
-            <span class="threat-level medium"><i aria-hidden="true"></i><b>MEDIUM</b><small>4.0–6.9</small></span>
-            <span class="threat-level low"><i aria-hidden="true"></i><b>LOW</b><small>0.1–3.9</small></span>
+            <span class="threat-level critical"><i aria-hidden="true"></i><b>Critical</b><small>9.0–10</small></span>
+            <span class="threat-level high"><i aria-hidden="true"></i><b>High</b><small>7.0–8.9</small></span>
+            <span class="threat-level medium"><i aria-hidden="true"></i><b>Medium</b><small>4.0–6.9</small></span>
+            <span class="threat-level low"><i aria-hidden="true"></i><b>Low</b><small>0.1–3.9</small></span>
           </div>
-          <div class="threat-key-foot"><span>GHSA</span><span>NVD</span><span>OSV</span><span>AI</span></div>
+          <div class="threat-key-foot"><span>GHSA</span><span>NVD</span><span>OSV</span><span>EPSS</span><span>AI</span></div>
         </div>
       </section>
 
       <section class="result-command" aria-label="Result controls">
         <div class="result-summary">
-          <span class="command-label">CURRENT QUEUE</span>
-          <div class="summary" id="summary" role="status" aria-live="polite">Select a threat class, then run a search.</div>
+          <span class="command-label">Queue</span>
+          <div class="summary" id="summary" role="status" aria-live="polite">Select a bug class, then run a search.</div>
         </div>
         <div class="toolbar-actions">
-          <button class="ai" id="ai-btn" type="button" disabled title="Ask the AI to score the current results"><span class="button-step">02</span> Refine with AI</button>
-          <button id="retry-btn" class="warn-btn" type="button" disabled title="Re-run AI on advisories that errored">↻ Retry failed</button>
+          <button class="ai" id="ai-btn" type="button" disabled title="Ask the AI to score the current results">Refine with AI</button>
+          <button id="retry-btn" class="warn-btn" type="button" disabled title="Re-run AI on advisories that errored">Retry failed</button>
           <label class="check match-filter" id="only_match_label" title="Runs AI first if needed, then hides non-matches">
-            <input type="checkbox" id="only_match" disabled><span><b>03</b> Confirmed only</span>
+            <input type="checkbox" id="only_match" disabled><span>Confirmed only</span>
           </label>
           <details class="export-menu">
             <summary id="export-btn" aria-disabled="true" tabindex="-1"><span>Export</span><span aria-hidden="true">↓</span></summary>
             <div class="export-pop">
-              <span class="menu-label">EXPORT CURRENT QUEUE</span>
+              <span class="menu-label">Export current queue</span>
               <button type="button" data-fmt="csv"><span>CSV</span><small>All visible records</small></button>
               <button type="button" data-fmt="json"><span>JSON</span><small>Full advisory objects</small></button>
-              <button type="button" data-fmt="csv-matches"><span>CSV / MATCHES</span><small>AI-confirmed only</small></button>
+              <button type="button" data-fmt="csv-matches"><span>CSV / matches</span><small>AI-confirmed only</small></button>
             </div>
           </details>
         </div>
@@ -278,17 +296,16 @@
 
       <section id="results" class="results" aria-label="Advisory results" aria-busy="false">
         <div class="empty empty-onboarding">
-          <div class="empty-index" aria-hidden="true">00</div>
           <div class="empty-copy">
-            <span class="eyebrow">AWAITING QUERY</span>
-            <h3>Turn advisory noise into an investigation signal.</h3>
-            <p>Choose a ready-made scenario or shape your own scope in the query console. VulnSight will merge, normalize and rank the records.</p>
+            <span class="eyebrow">No query yet</span>
+            <h3>Search by how the bug works, not by the title.</h3>
+            <p>Pick a preset or set a class and ecosystem. VulnSight merges sources, then you can score the queue with AI.</p>
             <ol class="workflow" aria-label="Analysis workflow">
-              <li><span>01</span><b>Search</b><small>Collect by CWE</small></li>
-              <li><span>02</span><b>Refine</b><small>Score with AI</small></li>
-              <li><span>03</span><b>Isolate</b><small>Keep true matches</small></li>
+              <li><span>1</span><b>Search</b><small>Collect by CWE</small></li>
+              <li><span>2</span><b>Refine</b><small>Score with AI</small></li>
+              <li><span>3</span><b>Isolate</b><small>Keep true matches</small></li>
             </ol>
-            <p class="empty-tip"><span aria-hidden="true">↳</span> BAC + Java is preselected. “Run intelligent scan” handles the complete flow.</p>
+            <p class="empty-tip">BAC + Maven is preselected. “Run intelligent scan” runs the full flow.</p>
           </div>
         </div>
       </section>
@@ -296,13 +313,19 @@
   </div>
 
   <script nonce="{{ csp_nonce }}">
-    // Apply saved theme immediately to prevent flash
     (function() {
       var saved = localStorage.getItem('theme');
       if (saved === 'light' || saved === 'dark') {
         document.documentElement.dataset.theme = saved;
       }
-      // Set the toggle icon (updated after DOM ready below)
+      var meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) {
+        var theme = document.documentElement.dataset.theme;
+        if (!theme) {
+          theme = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        }
+        meta.content = theme === 'dark' ? '#0b1218' : '#f4f7f8';
+      }
     })();
   </script>
   <script nonce="{{ csp_nonce }}">
@@ -325,25 +348,23 @@
         return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
       }
 
-      function updateIcon() {
-        toggle.textContent = getEffectiveTheme() === 'dark' ? '☀️' : '🌙';
-        toggle.title = getEffectiveTheme() === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
+      function updateToggle() {
+        var theme = getEffectiveTheme();
+        toggle.setAttribute('aria-label', theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme');
+        toggle.title = theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) meta.content = theme === 'dark' ? '#0b1218' : '#f4f7f8';
       }
 
       toggle.addEventListener('click', function() {
         var next = getEffectiveTheme() === 'dark' ? 'light' : 'dark';
         document.documentElement.dataset.theme = next;
         localStorage.setItem('theme', next);
-        updateIcon();
-        // Update meta theme-color for mobile browsers
-        var meta = document.querySelector('meta[name="theme-color"]');
-        if (meta) meta.content = next === 'dark' ? '#080808' : '#ffffff';
+        updateToggle();
       });
 
-      // Listen for OS preference changes (only affects icon when no manual override)
-      window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', updateIcon);
-
-      updateIcon();
+      window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', updateToggle);
+      updateToggle();
     })();
   </script>
 </body>

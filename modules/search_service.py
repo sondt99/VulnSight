@@ -528,10 +528,21 @@ def run_search(q: SearchQuery) -> SearchOutcome:
                 rec["epss_percentage"] = score["epss"]
                 rec["epss_percentile"] = score["percentile"]
 
-    # Sort by the requested field. (Fixes the old behaviour of always sorting
-    # by published_at even when sort=updated or sort=cve_id was requested.)
+    # Sort by the requested field. Numeric EPSS fields cannot fall back to ""
+    # — mixed float/str keys raise TypeError on Python 3.
     field = _SORT_FIELD[q.sort]
-    results.sort(key=lambda r: (r.get(field) or ""), reverse=(q.direction != "asc"))
+    numeric = field in ("epss_percentage", "epss_percentile")
+
+    def _sort_key(record: dict):
+        value = record.get(field)
+        if numeric:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return 0.0
+        return value or ""
+
+    results.sort(key=_sort_key, reverse=(q.direction != "asc"))
     results = results[:q.max_results]
 
     cache.upsert_advisories(results)

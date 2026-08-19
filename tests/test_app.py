@@ -339,6 +339,43 @@ class TestFlaskApp(unittest.TestCase):
             self.assertIn(f'data-fmt="{export_format}"', html)
         self.assertLess(html.index("window.BOOT"), html.index("app.js"))
         self.assertIn('id="ai-test-pill" type="button"', html)
+        self.assertIn('value="epss_percentage"', html)
+        self.assertIn('value="epss_percentile"', html)
+        self.assertIn('id="theme-toggle"', html)
+
+    def test_static_assets_served(self):
+        css = self.client.get("/static/style.css")
+        js = self.client.get("/static/app.js")
+        self.assertEqual(css.status_code, 200)
+        self.assertIn("text/css", css.headers.get("Content-Type", ""))
+        self.assertEqual(js.status_code, 200)
+        self.assertIn("function csvCell", js.get_data(as_text=True))
+        self.assertIn("epss_percentage", js.get_data(as_text=True))
+
+    def test_osv_status_endpoint(self):
+        r = self.client.get("/api/osv/status")
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertIn("supported", data)
+        self.assertIn("cached", data)
+
+    def test_csrf_blocks_foreign_origin(self):
+        r = self.client.post(
+            "/api/search",
+            json={"categories": ["bac"]},
+            headers={"Origin": "http://evil.example"},
+        )
+        self.assertEqual(r.status_code, 403)
+        self.assertIn("Cross-origin", r.get_json()["error"])
+
+    def test_csrf_allows_localhost_origin(self):
+        with mock.patch("modules.ghsa_client.fetch_advisories", return_value=[SAMPLE]):
+            r = self.client.post(
+                "/api/search",
+                json={"categories": ["bac"], "ecosystem": "maven"},
+                headers={"Origin": "http://127.0.0.1:5000"},
+            )
+        self.assertEqual(r.status_code, 200)
 
     def test_index_csp_nonce_matches_header(self):
         with mock.patch("modules.ghsa_client.gh_auth_ok", return_value=False):
