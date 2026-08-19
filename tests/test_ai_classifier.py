@@ -3,6 +3,7 @@
 _call_messages is mocked everywhere; AIConfig is built by hand (no .env read).
 """
 
+import json
 import os
 import sys
 
@@ -118,7 +119,7 @@ class TestClassify(unittest.TestCase):
         advs = [dict(SAMPLE, ghsa_id="A"), dict(SAMPLE, ghsa_id="B")]
         advs = [ghsa.normalize(a) for a in advs]
 
-        def fake_call(cfg, system, user, max_tokens=512, timeout=45):
+        def fake_call(cfg, system, user, max_tokens=512, timeout=45, **_kwargs):
             return '{"is_match": true, "confidence": 0.77, "vuln_type": "IDOR", "reason": "r"}'
 
         saved = []
@@ -134,7 +135,7 @@ class TestClassify(unittest.TestCase):
         adv = ghsa.normalize(SAMPLE)
         calls = {"n": 0}
 
-        def flaky(cfg, system, user, max_tokens=512, timeout=45):
+        def flaky(cfg, system, user, max_tokens=512, timeout=45, **_kwargs):
             calls["n"] += 1
             if calls["n"] < 3:
                 raise ai_classifier.AIError("429 rate limited", status=429, retryable=True)
@@ -151,7 +152,7 @@ class TestClassify(unittest.TestCase):
         adv = ghsa.normalize(SAMPLE)
         calls = {"n": 0}
 
-        def bad_key(cfg, system, user, max_tokens=512, timeout=45):
+        def bad_key(cfg, system, user, max_tokens=512, timeout=45, **_kwargs):
             calls["n"] += 1
             raise ai_classifier.AIError("401 invalid key", status=401, retryable=False)
 
@@ -166,7 +167,7 @@ class TestClassify(unittest.TestCase):
         adv = ghsa.normalize(SAMPLE)
         calls = {"n": 0}
 
-        def always_429(cfg, system, user, max_tokens=512, timeout=45):
+        def always_429(cfg, system, user, max_tokens=512, timeout=45, **_kwargs):
             calls["n"] += 1
             raise ai_classifier.AIError("429", status=429, retryable=True)
 
@@ -194,8 +195,8 @@ class TestClassify(unittest.TestCase):
         adv = ghsa.normalize(SAMPLE)
         calls = []
 
-        def by_key(cfg, system, user, max_tokens=512, timeout=45):
-            key = cfg.token
+        def by_key(cfg, system, user, max_tokens=512, timeout=45, token=None):
+            key = token if token is not None else cfg.token
             calls.append(key)
             if key.startswith("bad"):
                 raise ai_classifier.AIError("429", status=429, retryable=True)
@@ -214,7 +215,7 @@ class TestClassify(unittest.TestCase):
         adv = ghsa.normalize(SAMPLE)
         calls = {"n": 0}
 
-        def always_fail(cfg, system, user, max_tokens=512, timeout=45):
+        def always_fail(cfg, system, user, max_tokens=512, timeout=45, **_kwargs):
             calls["n"] += 1
             raise ai_classifier.AIError("503", status=503, retryable=True)
 
@@ -236,6 +237,38 @@ class TestClassify(unittest.TestCase):
         self.assertIn("error", res["A"])
         self.assertIn("kaboom", res["A"]["error"])
         self.assertIsNone(res["A"]["is_match"])
+
+    def test_glm_payload_disables_thinking(self):
+        cfg = ai_classifier.AIConfig("glm", "https://x", ["tok"], "glm-5.3")
+        captured = {}
+
+        class FakeResp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return (
+                    b'{"choices":[{"message":{"content":"PONG"}}]}'
+                )
+
+        def fake_open(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResp()
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_open):
+            out = ai_classifier._call_messages(cfg, "sys", "user")
+        self.assertEqual(out, "PONG")
+        self.assertEqual(captured["body"]["thinking"], {"type": "disabled"})
+
+    def test_classify_workers_follow_key_count(self):
+        eight = ai_classifier.AIConfig("glm", "https://x", ["k"] * 8, "m")
+        one = ai_classifier.AIConfig("glm", "https://x", ["k"], "m")
+        self.assertEqual(ai_classifier._classify_workers(eight, None), 8)
+        self.assertEqual(ai_classifier._classify_workers(one, None), 2)
+        self.assertEqual(ai_classifier._classify_workers(eight, 3), 3)
 
 
 if __name__ == "__main__":

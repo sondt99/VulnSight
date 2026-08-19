@@ -58,11 +58,23 @@ MAX_RETRIES = 3
 RETRY_BASE_DELAY = 1.5          # seconds; grows exponentially with jitter
 RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524}
 
-# The provider's "PRO" model is a reasoning model (GLM): it spends output tokens
-# "thinking" before answering. Too small a budget truncates the JSON verdict or
-# leaves an empty visible answer, so give it generous room.
-CLASSIFY_TIMEOUT = int(os.environ.get("AI_CLASSIFY_TIMEOUT", "180"))
-CLASSIFY_MAX_TOKENS = 4096
+# glm-5.3 and similar models "think" for tens of seconds per advisory unless
+# thinking is turned off. Classification is a short JSON verdict — thinking is
+# optional (AI_THINKING=on) and off by default.
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on", "enabled")
+
+
+THINKING_ENABLED = _env_flag("AI_THINKING", False)
+CLASSIFY_TIMEOUT = int(os.environ.get(
+    "AI_CLASSIFY_TIMEOUT", "180" if THINKING_ENABLED else "45"
+))
+CLASSIFY_MAX_TOKENS = int(os.environ.get(
+    "AI_CLASSIFY_MAX_TOKENS", "4096" if THINKING_ENABLED else "512"
+))
 CLASSIFIER_VERSION = "2"
 
 
@@ -153,7 +165,9 @@ def load_config(provider: str | None = None) -> AIConfig:
 # ---------------------------------------------------------------------------
 
 def _call_messages(cfg: AIConfig, system: str, user: str,
-                   max_tokens: int = 512, timeout: int = 45) -> str:
+                   max_tokens: int = 512, timeout: int = 45,
+                   token: str | None = None) -> str:
+    auth = token if token is not None else cfg.token
     if cfg.provider == "glm":
         # GLM (Zhipu/BigModel) speaks the OpenAI chat-completions shape: the
         # system prompt is just another entry in "messages", not a top-level field.
@@ -165,6 +179,10 @@ def _call_messages(cfg: AIConfig, system: str, user: str,
                 {"role": "user", "content": user},
             ],
         }
+        # Official BigModel / z.ai switch for reasoning models (glm-5.x).
+        payload["thinking"] = {
+            "type": "enabled" if THINKING_ENABLED else "disabled",
+        }
     else:
         payload = {
             "model": cfg.model,
@@ -175,11 +193,11 @@ def _call_messages(cfg: AIConfig, system: str, user: str,
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(cfg.messages_url, data=data, method="POST")
     req.add_header("content-type", "application/json")
-    req.add_header("authorization", f"Bearer {cfg.token}")
+    req.add_header("authorization", f"Bearer {auth}")
     if cfg.provider != "glm":
         # Anthropic Messages API wants the key on this header too. Some proxies
         # in front of it also accept a bearer token; harmless to send both.
-        req.add_header("x-api-key", cfg.token)
+        req.add_header("x-api-key", auth)
         req.add_header("anthropic-version", ANTHROPIC_VERSION)
     # Some proxy endpoints sit behind Cloudflare which returns error 1010 for the default
     # urllib client signature. Present a normal browser-ish User-Agent + Accept.
@@ -427,43 +445,64 @@ def _parse_verdict(text: str) -> dict:
 
 
 def classify_one(cfg: AIConfig, adv: dict, category: str,
-                 retries: int = MAX_RETRIES) -> dict:
+                 retries: int = MAX_RETRIES, token_offset: int = 0) -> dict:
     """Classify one advisory, retrying with key rotation on failure.
 
-    On each failure the active API key is rotated so every key gets at least
-    one attempt.  Retries cover both the network layer (rate limits, gateway
-    errors) and the parse layer (truncated / empty reasoning replies).
+    On each failure the next API key is tried immediately so a dead or
+    rate-limited key does not stall the batch. Backoff only starts after
+    every key has been tried once.
     """
     system = _SYSTEM_PROMPT
     user = _build_user_prompt(adv, category)
-    max_attempts = max(retries + 1, len(cfg.tokens))
+    nkeys = max(len(cfg.tokens), 1)
+    max_attempts = max(retries + 1, nkeys)
     last: AIError | None = None
     for attempt in range(max_attempts):
+        token = cfg.tokens[(token_offset + attempt) % nkeys] if cfg.tokens else ""
         try:
-            text = _call_messages(cfg, system, user, max_tokens=CLASSIFY_MAX_TOKENS,
-                                      timeout=CLASSIFY_TIMEOUT)
+            text = _call_messages(
+                cfg, system, user,
+                max_tokens=CLASSIFY_MAX_TOKENS,
+                timeout=CLASSIFY_TIMEOUT,
+                token=token,
+            )
             return _parse_verdict(text)
         except AIError as e:
             last = e
+            key_no = ((token_offset + attempt) % nkeys) + 1 if cfg.tokens else 0
             logger.warning("classify attempt %d/%d failed (key #%d): %s",
-                           attempt + 1, max_attempts,
-                           (cfg._current_idx % len(cfg.tokens)) + 1 if cfg.tokens else 0,
-                           e)
-            can_rotate = cfg.rotate_token()
-            if not can_rotate and not e.retryable:
+                           attempt + 1, max_attempts, key_no, e)
+            if nkeys <= 1 and not e.retryable:
                 raise
             if attempt == max_attempts - 1:
                 raise
+            # Another unused key remains — try it now, don't wait.
+            if (attempt + 1) < nkeys:
+                continue
             time.sleep(RETRY_BASE_DELAY * (2 ** min(attempt, 3)) + random.uniform(0, 0.6))
     assert last is not None
     raise last
+
+
+def _classify_workers(cfg: AIConfig, override: int | None) -> int:
+    if override is not None:
+        return max(1, min(16, override))
+    raw = os.environ.get("AI_CLASSIFY_WORKERS", "").strip()
+    if raw:
+        try:
+            return max(1, min(16, int(raw)))
+        except ValueError:
+            pass
+    # One worker per key, at least 2, at most 8. Extra keys exist specifically
+    # so we can run more than two classifications at once.
+    return max(2, min(8, len(cfg.tokens) or 2))
 
 
 def classify_many(
     cfg: AIConfig,
     advisories: list[dict],
     category: str,
-    max_workers: int = 2,
+    max_workers: int | None = None,
     on_result: Callable[[str, dict], None] | None = None,
 ) -> dict[str, dict]:
     """Classify many advisories concurrently. Returns {advisory_id: verdict}.
@@ -476,13 +515,12 @@ def classify_many(
     if not advisories:
         return results
 
+    workers = _classify_workers(cfg, max_workers)
+
     def _job(adv: dict, key_offset: int) -> tuple[str, dict]:
         gid = adv.get("advisory_id") or ""
-        # Set this worker's starting key
-        with cfg._lock:
-            cfg._current_idx = key_offset % len(cfg.tokens) if cfg.tokens else 0
         try:
-            return gid, classify_one(cfg, adv, category)
+            return gid, classify_one(cfg, adv, category, token_offset=key_offset)
         except AIError as e:
             return gid, {"error": str(e), "is_match": None,
                          "confidence": 0.0, "cached": False}
@@ -493,7 +531,7 @@ def classify_many(
             return gid, {"error": str(e), "is_match": None,
                          "confidence": 0.0, "cached": False}
 
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+    with ThreadPoolExecutor(max_workers=workers) as ex:
         futures = [ex.submit(_job, a, i) for i, a in enumerate(advisories)]
         for fut in as_completed(futures):
             gid, verdict = fut.result()

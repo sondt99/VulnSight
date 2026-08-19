@@ -337,13 +337,12 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       try {
         await classifyIds(ids);
         render();
-        // Auto-retry the ones that errored (rate limits / transient failures),
-        // up to 3 extra rounds. Backend also retries internally with backoff.
+        // One extra round for leftovers; the backend already retried per item.
         let round = 0;
-        while (failedIds().length && round < 3) {
+        while (failedIds().length && round < 1) {
           round++;
           const fails = failedIds();
-          $('#ai-btn').innerHTML = `<span class="spinner"></span>Retrying ${fails.length}… (${round}/3)`;
+          $('#ai-btn').innerHTML = `<span class="spinner"></span>Retrying ${fails.length}…`;
           toast(`Retrying ${fails.length} failed advisory(ies)… round ${round}`, 'ok');
           await classifyIds(fails);
           render();
