@@ -30,7 +30,7 @@ import time
 import urllib.request
 import zipfile
 
-from .config import BASE_DIR
+from .config import DATA_DIR
 from .cvss import base_score, base_score_v4, severity_from_score
 from .cwe_categories import category_keywords, normalize_cwe_id
 from .query_filters import matches_common_filters
@@ -38,7 +38,7 @@ from .query_filters import matches_common_filters
 logger = logging.getLogger(__name__)
 
 OSV_BASE = "https://osv-vulnerabilities.storage.googleapis.com"
-CACHE_DIR = os.path.join(BASE_DIR, "osv_cache")
+CACHE_DIR = os.path.join(DATA_DIR, "osv_cache")
 DEFAULT_MAX_AGE = 24 * 3600  # re-download the bulk zip at most once a day
 USER_AGENT = "vulnsight/1.0 (+osv bulk)"
 

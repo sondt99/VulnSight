@@ -48,6 +48,18 @@ cp .env.example .env      # then set AI_TOKEN for the AI pass (optional)
 # open http://127.0.0.1:5000
 ```
 
+**Docker**
+
+```bash
+cp .env.example .env                          # optional AI / NVD keys
+GH_TOKEN=$(gh auth token) docker compose up --build
+# open http://127.0.0.1:5000
+```
+
+The container cannot reuse a host `gh auth login` (the token lives in the OS
+keyring). Pass `GH_TOKEN` on the command line or put it in `.env`. Advisory
+cache and OSV zips persist in the `vulnsight-data` volume.
+
 **Requirements**
 
 - [`gh` CLI](https://cli.github.com/) installed and authenticated

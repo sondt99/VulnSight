@@ -304,6 +304,7 @@ def create_app():
 if __name__ == "__main__":
     app = create_app()
     port = int(os.environ.get("PORT", "5000"))
+    host = os.environ.get("HOST", "127.0.0.1").strip() or "127.0.0.1"
     debug = "--debug" in sys.argv
-    print(f"  VulnSight -> http://127.0.0.1:{port}")
-    app.run(host="127.0.0.1", port=port, debug=debug)
+    print(f"  VulnSight -> http://{host}:{port}")
+    app.run(host=host, port=port, debug=debug)

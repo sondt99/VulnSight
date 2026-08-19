@@ -17,9 +17,9 @@ import sqlite3
 import time
 from contextlib import contextmanager
 
-from .config import BASE_DIR
+from .config import DATA_DIR
 
-DB_PATH = os.path.join(BASE_DIR, "advisories.db")
+DB_PATH = os.path.join(DATA_DIR, "advisories.db")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS advisories (
@@ -85,7 +85,11 @@ def _db(path: str | None = None):
 
 def init_db(path: str | None = None) -> None:
     """Create / migrate the database to the latest schema version."""
-    with _db(path) as conn:
+    db_path = path or DB_PATH
+    parent = os.path.dirname(db_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with _db(db_path) as conn:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS schema_version ("
             "    version INTEGER NOT NULL"

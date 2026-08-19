@@ -1,0 +1,46 @@
+# VulnSight
+#
+#   cp .env.example .env          # optional AI / NVD keys
+#   GH_TOKEN=$(gh auth token) docker compose up --build
+#   open http://127.0.0.1:5000
+#
+# GHSA fetches go through `gh`. A host `gh auth login` keeps the token in the
+# OS keyring, which the container cannot read — export GH_TOKEN (or put it in
+# .env) instead of mounting ~/.config/gh.
+#
+# Persist the SQLite cache / OSV bulk zips:
+#   docker volume inspect vulnsight_vulnsight-data
+# Or bind-mount by replacing the named volume with:  ./data:/data
+
+services:
+  vulnsight:
+    build: .
+    image: vulnsight:local
+    ports:
+      - "${PORT:-5000}:5000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "5000"
+      VULNSIGHT_DATA_DIR: /data
+      GH_TOKEN: ${GH_TOKEN:-}
+    volumes:
+      - vulnsight-data:/data
+    init: true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/api/meta', timeout=5)",
+        ]
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  vulnsight-data:
