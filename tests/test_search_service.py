@@ -38,6 +38,8 @@ class TestParseSearchQuery(unittest.TestCase):
             search_service.parse_search_query({})
         self.assertEqual(cm.exception.status, 400)
         self.assertIn("category", str(cm.exception).lower())
+        self.assertEqual(cm.exception.public_message, str(cm.exception))
+        self.assertNotIn("Traceback", cm.exception.public_message)
 
     def test_defaults(self):
         q = search_service.parse_search_query({"categories": ["bac"]})

@@ -233,7 +233,7 @@ def create_app():
             q = search_service.parse_search_query(body)
             outcome = search_service.run_search(q)
         except search_service.SearchError as e:
-            return jsonify({"error": str(e)}), e.status
+            return jsonify({"error": e.public_message}), e.status
         return jsonify(
             {
                 "count": len(outcome.results),
@@ -279,7 +279,7 @@ def create_app():
             )))
             force = search_service.parse_bool(body.get("force"), False)
         except search_service.SearchError as exc:
-            return jsonify({"error": str(exc)}), exc.status
+            return jsonify({"error": exc.public_message}), exc.status
 
         invalid_categories = [category for category in categories if category not in CATEGORIES]
         if invalid_categories:

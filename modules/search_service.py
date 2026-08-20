@@ -37,11 +37,15 @@ _EXTRA_CWE_RE = re.compile(rf"(?:CWE-)?([0-9]{{1,{MAX_CWE_ID_DIGITS}}})", re.IGN
 
 
 class SearchError(RuntimeError):
-    """Search failure that maps to an HTTP response."""
+    """Search failure that maps to an HTTP response.
+
+    Return ``public_message`` to clients; do not stringify the exception.
+    """
 
     def __init__(self, message: str, status: int = 400):
         super().__init__(message)
         self.status = status
+        self.public_message = message
 
 
 @dataclass
