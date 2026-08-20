@@ -40,6 +40,9 @@ Requirements:
 5. Click **✨ Refine with AI** → each advisory is sent to the LLM which returns
    `is_match / confidence / vuln_type / reason`. Toggle **Only AI matches** to
    hide the false positives. Verdicts are cached in SQLite so re-runs are free.
+   **Do not skip this for BAC:** umbrella CWEs like `CWE-284` also tag SSRF,
+   ReDoS, crypto bugs, and header issues. A live pass of 272 newest BAC-tagged
+   advisories dropped 25 that were not access control.
 6. **⚡ Test AI** pill (top-right) checks the endpoint is reachable.
 7. **⬇ Export** the current (filtered) list as **CSV**, **JSON**, or **CSV — AI
    matches only**. CSV is Excel-friendly (UTF-8 BOM, RFC-4180 quoting) and
@@ -153,5 +156,6 @@ cd VulnSight
 - AI calls run 6-wide concurrently; verdicts persist per `(advisory, category)`.
 - The token lives only in `.env` (git-ignored). `./run.sh` chmods `.env` to
   `0600`. The AI request goes to the `AI_BASE_URL` you configure — nowhere else.
-- Docker publishes `127.0.0.1:5000` only. Optional `VULNSIGHT_API_TOKEN` in
-  `.env` requires `X-VulnSight-Token` on POST `/api/*`.
+- Docker publishes `127.0.0.1:5000` only. A non-loopback bind with credentials
+  and no `VULNSIGHT_API_TOKEN` generates `.vulnsight_api_token` and the UI
+  asks for it. Set `VULNSIGHT_API_TOKEN` yourself to pick the value.

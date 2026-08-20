@@ -59,15 +59,18 @@ Follow these if you load real credentials:
   `VULNSIGHT_API_TOKEN`. `./run.sh` sets `.env` to mode `0600`.
 - Prefer `./run.sh` or `docker compose` as documented. Compose publishes
   **`127.0.0.1:5000` only**.
-- Do **not** run `docker run -p 5000:5000 …`. That maps the port on all
-  interfaces. Gunicorn inside the image listens on `0.0.0.0`; the host publish
-  is what keeps it private.
+- Do **not** run `docker run -p 5000:5000 …` unless you intend to expose the
+  UI. Gunicorn listens on `0.0.0.0` inside the container. If credentials are
+  loaded and `VULNSIGHT_API_TOKEN` is unset, the app **generates a token**,
+  saves it as `.vulnsight_api_token` in the data dir, and requires it on
+  `POST /api/*`.
 - If you bind beyond loopback (`HOST=0.0.0.0`, a LAN compose port, a reverse
-  proxy): set a long random `VULNSIGHT_API_TOKEN`, set
-  `VULNSIGHT_PUBLIC_HOST` to the DNS name the browser uses, and do not use
-  `python app.py --debug`.
+  proxy): set a long random `VULNSIGHT_API_TOKEN` (or accept the generated
+  one), set `VULNSIGHT_PUBLIC_HOST` to the DNS name the browser uses, and do
+  not use `python app.py --debug`.
 - `python app.py` refuses a non-loopback bind while credentials are loaded
-  unless **both** `VULNSIGHT_EXPOSE=1` and `VULNSIGHT_API_TOKEN` are set.
+  unless **both** `VULNSIGHT_EXPOSE=1` and `VULNSIGHT_API_TOKEN` are set, and
+  refuses `--debug` unless the bind is loopback.
 
 Relevant knobs (see `.env.example`):
 

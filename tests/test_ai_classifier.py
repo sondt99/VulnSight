@@ -298,6 +298,81 @@ class TestClassify(unittest.TestCase):
         self.assertEqual(res["A"]["error"], "AI provider returned HTTP 403")
         self.assertNotIn("ghp_LEAKED", json.dumps(res))
 
+    def test_quota_429_skips_dead_key(self):
+        cfg = ai_classifier.AIConfig("glm", "https://x", ["dead", "live"], "m")
+        adv = ghsa.normalize(SAMPLE)
+        calls = []
+
+        class OkResp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return (
+                    b'{"choices":[{"message":{"content":'
+                    b'"{\\"is_match\\": true, \\"confidence\\": 0.9, '
+                    b'\\"vuln_type\\": \\"t\\", \\"reason\\": \\"r\\"}"}}]}'
+                )
+
+        def fake_open(req, timeout=None):
+            auth = req.get_header("Authorization") or req.get_header("authorization")
+            token = (auth or "").split()[-1]
+            calls.append(token)
+            if token == "dead":
+                raise urllib.error.HTTPError(
+                    url="https://x/chat/completions",
+                    code=429,
+                    msg="Too Many Requests",
+                    hdrs=None,
+                    fp=io.BytesIO(
+                        b'{"error":{"code":"1310","message":'
+                        b'"Weekly/Monthly Limit Exhausted"}}'
+                    ),
+                )
+            return OkResp()
+
+        slept = []
+        with mock.patch("urllib.request.urlopen", side_effect=fake_open), \
+             mock.patch("modules.ai_classifier.time.sleep", side_effect=lambda *_: slept.append(1)):
+            v = ai_classifier.classify_one(cfg, adv, "bac")
+        self.assertTrue(v["is_match"])
+        self.assertEqual(calls, ["dead", "live"])
+        self.assertEqual(slept, [])
+
+    def test_all_keys_quota_returns_generic_message(self):
+        cfg = self._cfg()
+        advs = [ghsa.normalize(dict(SAMPLE, ghsa_id="A"))]
+        err = urllib.error.HTTPError(
+            url="https://x/chat/completions",
+            code=429,
+            msg="Too Many Requests",
+            hdrs=None,
+            fp=io.BytesIO(
+                b'{"error":{"code":"1310","message":"Weekly/Monthly Limit Exhausted"}}'
+            ),
+        )
+        with mock.patch("urllib.request.urlopen", side_effect=err), \
+             mock.patch("modules.ai_classifier.time.sleep", lambda *_: None):
+            res = ai_classifier.classify_many(cfg, advs, "bac")
+        self.assertEqual(res["A"]["error"], "AI quota exhausted. Try again later.")
+
+    def test_classify_http_error_quota_vs_rate(self):
+        retryable, exhausted, skip = ai_classifier._classify_http_error(
+            429, "Weekly/Monthly Limit Exhausted"
+        )
+        self.assertFalse(retryable)
+        self.assertTrue(exhausted)
+        self.assertGreaterEqual(skip, 3600)
+        retryable, exhausted, skip = ai_classifier._classify_http_error(
+            429, "Rate limit reached for requests"
+        )
+        self.assertTrue(retryable)
+        self.assertTrue(exhausted)
+        self.assertLessEqual(skip, 60)
+
     def test_classify_workers_follow_key_count(self):
         eight = ai_classifier.AIConfig("glm", "https://x", ["k"] * 8, "m")
         one = ai_classifier.AIConfig("glm", "https://x", ["k"], "m")

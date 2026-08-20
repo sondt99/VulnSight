@@ -55,6 +55,8 @@ def create_app():
     except ValueError:
         _max_request_bytes = 1048576
     app.config["MAX_CONTENT_LENGTH"] = max(1024, _max_request_bytes)
+    _bind_host = os.environ.get("HOST", "127.0.0.1").strip() or "127.0.0.1"
+    security.ensure_api_token_for_bind(_bind_host)
     app.config["VULNSIGHT_TOKEN"] = os.environ.get("VULNSIGHT_API_TOKEN", "").strip()
     app.config["PUBLIC_HOSTS"] = security.public_hosts_from_env()
     _rate_off = os.environ.get("VULNSIGHT_RATE_LIMIT", "on").strip().lower() in (
@@ -100,7 +102,11 @@ def create_app():
             return None
         if limiter.allow(request.remote_addr or "unknown"):
             return None
-        return jsonify({"error": "Too many requests. Try again shortly."}), 429
+        retry_after = str(getattr(limiter, "window_seconds", 60))
+        response = jsonify({"error": "Too many requests. Try again shortly."})
+        response.status_code = 429
+        response.headers["Retry-After"] = retry_after
+        return response
 
     @app.before_request
     def _auth_check():
@@ -360,5 +366,6 @@ if __name__ == "__main__":
     host = os.environ.get("HOST", "127.0.0.1").strip() or "127.0.0.1"
     security.assert_safe_bind(host)
     debug = "--debug" in sys.argv
+    security.assert_safe_debug(host, debug)
     print(f"  VulnSight -> http://{host}:{port}")
     app.run(host=host, port=port, debug=debug)

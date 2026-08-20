@@ -4,8 +4,11 @@
 #   GH_TOKEN=$(gh auth token) docker compose up --build
 #   open http://127.0.0.1:5000
 #
-# The published port is loopback-only. To listen on the LAN, change the
-# ports bind to 0.0.0.0 and set VULNSIGHT_API_TOKEN in .env.
+# The published port is loopback-only. Gunicorn still binds 0.0.0.0 inside
+# the container, so if .env has AI/GitHub keys and no VULNSIGHT_API_TOKEN,
+# the app generates one (data volume: .vulnsight_api_token) and the UI
+# will ask for it. To listen on the LAN, change the ports bind and set
+# VULNSIGHT_API_TOKEN yourself.
 #
 # GHSA fetches go through `gh`. A host `gh auth login` keeps the token in the
 # OS keyring, which the container cannot read — export GH_TOKEN (or put it in

@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import hmac
 import ipaddress
+import logging
 import os
+import secrets
+import sys
 import threading
 import time
 from collections import deque
 from urllib.parse import urlsplit
+
+logger = logging.getLogger(__name__)
+
+TOKEN_FILENAME = ".vulnsight_api_token"
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _CROSS_SITE = frozenset({"cross-site", "same-site"})
@@ -113,6 +120,70 @@ def assert_safe_bind(host: str) -> None:
             f"Refusing to bind {host} with credentials loaded and no "
             "VULNSIGHT_API_TOKEN. Set a shared secret, or use HOST=127.0.0.1."
         )
+
+
+def assert_safe_debug(host: str, debug: bool) -> None:
+    """Werkzeug's debugger is RCE; never enable it on a non-loopback bind."""
+    if not debug:
+        return
+    if is_loopback_bind(host):
+        return
+    raise SystemExit(
+        "Refusing --debug on a non-loopback bind. The Werkzeug debugger "
+        "is remote code execution if the port is reachable."
+    )
+
+
+def token_file_path() -> str:
+    from .config import BASE_DIR
+    data_dir = os.path.abspath(os.environ.get("VULNSIGHT_DATA_DIR") or BASE_DIR)
+    return os.path.join(data_dir, TOKEN_FILENAME)
+
+
+def _load_or_create_token(path: str) -> str:
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as fh:
+            existing = fh.read().strip()
+        if existing:
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+            logger.info("Using API token from %s", path)
+            return existing
+    token = secrets.token_urlsafe(32)
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(token + "\n")
+    print(
+        f"!! Bind is {os.environ.get('HOST', 'non-loopback')} with credentials "
+        f"and no VULNSIGHT_API_TOKEN.\n"
+        f"!! Generated a token and saved it to {path} (mode 0600).\n"
+        f"!! Enter this token in the UI: {token}",
+        file=sys.stderr,
+    )
+    return token
+
+
+def ensure_api_token_for_bind(host: str) -> str:
+    """Guarantee an API token when credentials are loaded on a non-loopback bind.
+
+    Gunicorn/Docker listen on 0.0.0.0 inside the container; compose may still
+    publish loopback, but ``docker run -p 5000:5000`` would otherwise expose
+    unauthenticated spend of AI/GitHub keys. Loopback ``python app.py`` is
+    unchanged: token stays optional.
+    """
+    current = os.environ.get("VULNSIGHT_API_TOKEN", "").strip()
+    if is_loopback_bind(host) or not has_loaded_secrets():
+        return current
+    if current:
+        return current
+    token = _load_or_create_token(token_file_path())
+    os.environ["VULNSIGHT_API_TOKEN"] = token
+    return token
 
 
 def _hostname_from_url(value: str) -> tuple[str, bool]:

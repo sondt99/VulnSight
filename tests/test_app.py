@@ -34,6 +34,7 @@ class TestFlaskApp(unittest.TestCase):
             "VULNSIGHT_API_TOKEN": "",
             "VULNSIGHT_RATE_LIMIT": "off",
             "VULNSIGHT_PUBLIC_HOST": "",
+            "HOST": "127.0.0.1",
         }, clear=False)
         self._sec_env.start()
         from app import create_app
@@ -503,6 +504,7 @@ class TestAppAuthAndLimits(unittest.TestCase):
             "VULNSIGHT_SEARCH_RATE": "30",
             "VULNSIGHT_AI_RATE": "20",
             "VULNSIGHT_RATE_WINDOW": "60",
+            "HOST": "127.0.0.1",
         }
         merged.update(env)
         self._env = mock.patch.dict(os.environ, merged, clear=False)
@@ -578,6 +580,7 @@ class TestAppAuthAndLimits(unittest.TestCase):
             )
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 429)
+        self.assertEqual(second.headers.get("Retry-After"), "60")
 
     def test_unauthenticated_posts_are_rate_limited(self):
         self._make({
@@ -589,6 +592,30 @@ class TestAppAuthAndLimits(unittest.TestCase):
         second = self.client.post("/api/search", json={"categories": ["bac"]})
         self.assertEqual(first.status_code, 401)
         self.assertEqual(second.status_code, 429)
+
+    def test_non_loopback_autogens_token(self):
+        data_dir = tempfile.mkdtemp()
+        self._make({
+            "HOST": "0.0.0.0",
+            "GLM_TOKEN": "live-key",
+            "VULNSIGHT_API_TOKEN": "",
+            "VULNSIGHT_DATA_DIR": data_dir,
+            "VULNSIGHT_RATE_LIMIT": "off",
+        })
+        token = self.app.config["VULNSIGHT_TOKEN"]
+        self.assertTrue(token)
+        path = os.path.join(data_dir, ".vulnsight_api_token")
+        with open(path, encoding="utf-8") as fh:
+            saved = fh.read().strip()
+        self.assertEqual(saved, token)
+        self.assertEqual(self.client.post("/api/search", json={"categories": ["bac"]}).status_code, 401)
+        with mock.patch("modules.ghsa_client.fetch_advisories", return_value=[SAMPLE]):
+            ok = self.client.post(
+                "/api/search",
+                json={"categories": ["bac"], "ecosystem": "maven"},
+                headers={"X-VulnSight-Token": token},
+            )
+        self.assertEqual(ok.status_code, 200)
 
     def test_ai_rate_limit(self):
         self._make({"VULNSIGHT_AI_RATE": "1", "VULNSIGHT_RATE_WINDOW": "60"})

@@ -179,6 +179,37 @@ class TestBindGuard(unittest.TestCase):
         ):
             security.assert_safe_bind("0.0.0.0")
 
+    def test_debug_refused_off_loopback(self):
+        with self.assertRaises(SystemExit):
+            security.assert_safe_debug("0.0.0.0", True)
+        security.assert_safe_debug("127.0.0.1", True)
+        security.assert_safe_debug("0.0.0.0", False)
+
+    def test_ensure_token_loopback_stays_optional(self):
+        with mock.patch.dict(
+            os.environ, {"GLM_TOKEN": "live", "VULNSIGHT_API_TOKEN": ""}, clear=False
+        ):
+            self.assertEqual(security.ensure_api_token_for_bind("127.0.0.1"), "")
+
+    def test_ensure_token_autogens_on_public_bind(self):
+        import tempfile
+        data_dir = tempfile.mkdtemp()
+        env = {
+            "GLM_TOKEN": "live",
+            "VULNSIGHT_API_TOKEN": "",
+            "VULNSIGHT_DATA_DIR": data_dir,
+            "HOST": "0.0.0.0",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            token = security.ensure_api_token_for_bind("0.0.0.0")
+        self.assertTrue(token)
+        path = os.path.join(data_dir, ".vulnsight_api_token")
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read().strip(), token)
+        with mock.patch.dict(os.environ, {**env, "VULNSIGHT_API_TOKEN": ""}, clear=False):
+            again = security.ensure_api_token_for_bind("0.0.0.0")
+        self.assertEqual(again, token)
+
 
 class TestRateLimiter(unittest.TestCase):
     def test_blocks_after_budget(self):

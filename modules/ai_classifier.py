@@ -80,16 +80,62 @@ CLASSIFIER_VERSION = "2"
 
 class AIError(RuntimeError):
     def __init__(self, message: str, status: int | None = None,
-                 retryable: bool = False, *, public_message: str | None = None):
+                 retryable: bool = False, *, public_message: str | None = None,
+                 key_exhausted: bool = False):
         super().__init__(message)
         self.status = status
         self.retryable = retryable
+        self.key_exhausted = key_exhausted
         if public_message:
             self.public_message = public_message
+        elif key_exhausted:
+            self.public_message = "AI quota exhausted. Try again later."
         elif status is not None:
             self.public_message = f"AI provider returned HTTP {status}"
         else:
             self.public_message = "AI request failed"
+
+
+# Provider 429 bodies that mean "this key is done", not "slow down and retry".
+_QUOTA_MARKERS = (
+    "weekly/monthly limit exhausted",
+    "usage limit reached",
+    "limit exhausted",
+    "fair usage policy",
+    "quota",
+    "insufficient_quota",
+)
+_RATE_MARKERS = (
+    "rate limit reached for requests",
+    "rate_limit",
+    "too many requests",
+)
+
+
+def _quota_skip_seconds(detail: str) -> float:
+    text = (detail or "").lower()
+    if "5 hour" in text or "5-hour" in text:
+        return 5 * 3600
+    if "week" in text or "month" in text:
+        return 12 * 3600
+    if "fair usage" in text:
+        return 6 * 3600
+    return 6 * 3600
+
+
+def _classify_http_error(status: int, detail: str) -> tuple[bool, bool, float]:
+    """Return (retryable, key_exhausted, skip_seconds)."""
+    text = (detail or "").lower()
+    if status in (401, 403):
+        return False, True, 24 * 3600
+    if status == 429:
+        if any(marker in text for marker in _QUOTA_MARKERS):
+            return False, True, _quota_skip_seconds(text)
+        if any(marker in text for marker in _RATE_MARKERS):
+            return True, True, 30
+        # Unknown 429: try the next key immediately, then backoff.
+        return True, True, 60
+    return status in RETRYABLE_STATUS, False, 0
 
 
 @dataclass
@@ -101,6 +147,8 @@ class AIConfig:
     _current_idx: int = field(default=0, init=False, repr=False, compare=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False,
                                   repr=False, compare=False)
+    _skip_until: dict[int, float] = field(default_factory=dict, init=False,
+                                          repr=False, compare=False)
 
     @property
     def configured(self) -> bool:
@@ -115,15 +163,38 @@ class AIConfig:
             return self.tokens[self._current_idx % len(self.tokens)]
 
     def rotate_token(self) -> bool:
-        """Advance to the next token. Returns False if only one token exists."""
+        """Advance to the next live token. Returns False if none remain."""
         with self._lock:
             if len(self.tokens) <= 1:
                 return False
-            prev = self._current_idx
-            self._current_idx = (self._current_idx + 1) % len(self.tokens)
-            logger.info("Rotated API key #%d → #%d  (%d keys total)",
-                        prev + 1, self._current_idx + 1, len(self.tokens))
-            return True
+            n = len(self.tokens)
+            now = time.monotonic()
+            for step in range(1, n + 1):
+                idx = (self._current_idx + step) % n
+                if self._skip_until.get(idx, 0) <= now:
+                    prev = self._current_idx
+                    self._current_idx = idx
+                    logger.info("Rotated API key #%d → #%d  (%d keys total)",
+                                prev + 1, idx + 1, n)
+                    return True
+            return False
+
+    def mark_skip_token(self, token: str, seconds: float) -> None:
+        if not token or seconds <= 0:
+            return
+        with self._lock:
+            now = time.monotonic()
+            for i, value in enumerate(self.tokens):
+                if value == token:
+                    self._skip_until[i] = max(self._skip_until.get(i, 0), now + seconds)
+                    logger.info("Skipping API key #%d for %.0fs", i + 1, seconds)
+                    return
+
+    def live_indices(self) -> list[int]:
+        now = time.monotonic()
+        with self._lock:
+            return [i for i in range(len(self.tokens))
+                    if self._skip_until.get(i, 0) <= now]
 
     @property
     def messages_url(self) -> str:
@@ -215,11 +286,19 @@ def _call_messages(cfg: AIConfig, system: str, user: str,
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")[:500]
         logger.warning("AI provider HTTP %s: %s", e.code, detail)
+        retryable, exhausted, skip_for = _classify_http_error(e.code, detail)
+        if exhausted and auth:
+            cfg.mark_skip_token(auth, skip_for)
+        if e.code == 429 and exhausted and not retryable:
+            public = "AI quota exhausted. Try again later."
+        else:
+            public = f"AI provider returned HTTP {e.code}"
         raise AIError(
             f"AI HTTP {e.code}: {detail}",
             status=e.code,
-            retryable=e.code in RETRYABLE_STATUS,
-            public_message=f"AI provider returned HTTP {e.code}",
+            retryable=retryable,
+            public_message=public,
+            key_exhausted=exhausted,
         ) from e
     except urllib.error.URLError as e:
         # Network-level failure (DNS, connection reset, timeout) — transient.
@@ -289,6 +368,8 @@ def _call_messages_retrying(cfg: AIConfig, system: str, user: str,
                 raise
             if attempt == max_attempts - 1:
                 raise
+            if e.key_exhausted:
+                continue
             delay = RETRY_BASE_DELAY * (2 ** min(attempt, 3)) + random.uniform(0, 0.6)
             time.sleep(delay)
     assert last is not None
@@ -496,7 +577,22 @@ def classify_one(cfg: AIConfig, adv: dict, category: str,
     max_attempts = max(retries + 1, nkeys)
     last: AIError | None = None
     for attempt in range(max_attempts):
-        token = cfg.tokens[(token_offset + attempt) % nkeys] if cfg.tokens else ""
+        live = cfg.live_indices() if cfg.tokens else []
+        if cfg.tokens and not live:
+            raise AIError(
+                "all API keys exhausted",
+                status=429,
+                retryable=False,
+                public_message="AI quota exhausted. Try again later.",
+                key_exhausted=True,
+            )
+        if live:
+            idx = live[(token_offset + attempt) % len(live)]
+            token = cfg.tokens[idx]
+            key_no = idx + 1
+        else:
+            token = ""
+            key_no = 0
         try:
             text = _call_messages(
                 cfg, system, user,
@@ -507,15 +603,14 @@ def classify_one(cfg: AIConfig, adv: dict, category: str,
             return _parse_verdict(text)
         except AIError as e:
             last = e
-            key_no = ((token_offset + attempt) % nkeys) + 1 if cfg.tokens else 0
             logger.warning("classify attempt %d/%d failed (key #%d): %s",
                            attempt + 1, max_attempts, key_no, e)
             if nkeys <= 1 and not e.retryable:
                 raise
             if attempt == max_attempts - 1:
                 raise
-            # Another unused key remains — try it now, don't wait.
-            if (attempt + 1) < nkeys:
+            # Dead/quota keys: try the next live key immediately.
+            if e.key_exhausted or (attempt + 1) < nkeys:
                 continue
             time.sleep(RETRY_BASE_DELAY * (2 ** min(attempt, 3)) + random.uniform(0, 0.6))
     assert last is not None

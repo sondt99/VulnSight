@@ -12,3 +12,4 @@ advisories.db
 advisories.db-wal
 advisories.db-shm
 osv_cache/
+.vulnsight_api_token

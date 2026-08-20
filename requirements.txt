@@ -1,2 +1,2 @@
-Flask
-click
+Flask>=3.1.2,<4
+click>=8.1,<9

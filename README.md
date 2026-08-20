@@ -61,11 +61,13 @@ container cannot reuse a host `gh auth login` (the token lives in the OS
 keyring). Pass `GH_TOKEN` on the command line or put it in `.env`. Advisory
 cache and OSV zips persist in the `vulnsight-data` volume.
 
-If you change the compose bind to expose the port on the LAN, set
-`VULNSIGHT_API_TOKEN` in `.env` so `/api/search` and `/api/ai/*` require
-the `X-VulnSight-Token` header. `python app.py` with `HOST` other than
-loopback refuses to start while credentials are loaded unless both
-`VULNSIGHT_EXPOSE=1` and `VULNSIGHT_API_TOKEN` are set.
+If credentials are loaded and the process listens on a non-loopback address
+(Docker/gunicorn bind `0.0.0.0` inside the container), the app requires a
+token: set `VULNSIGHT_API_TOKEN` or accept the generated
+`.vulnsight_api_token` in the data directory. `python app.py` with `HOST`
+other than loopback refuses to start while credentials are loaded unless
+both `VULNSIGHT_EXPOSE=1` and `VULNSIGHT_API_TOKEN` are set, and refuses
+`--debug` off loopback.
 
 **Requirements**
 
