@@ -107,5 +107,7 @@ tests/        per-module offline unit tests
 
 - **[USAGE.md](USAGE.md)** — full UI walkthrough, data-source details, the list
   of shipped bug classes, and coverage notes.
+- **[SECURITY.md](SECURITY.md)** — how to report vulnerabilities, threat model,
+  and how to run this with credentials without exposing the port.
 - Extend or tune bug classes in
   [`modules/cwe_categories.py`](modules/cwe_categories.py).
