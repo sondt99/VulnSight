@@ -312,6 +312,17 @@
     </main>
   </div>
 
+  <div id="auth-gate" class="auth-gate" hidden>
+    <div class="auth-gate-card" role="dialog" aria-labelledby="auth-gate-title" aria-modal="true">
+      <span class="eyebrow">Access</span>
+      <h2 id="auth-gate-title">API token required</h2>
+      <p id="auth-gate-hint">This instance sets VULNSIGHT_API_TOKEN. Enter it to search or classify.</p>
+      <label for="auth-token">Token</label>
+      <input id="auth-token" type="password" autocomplete="off" spellcheck="false" aria-describedby="auth-gate-hint">
+      <button id="auth-save" type="button">Continue</button>
+    </div>
+  </div>
+
   <script nonce="{{ csp_nonce }}">
     (function() {
       var saved = localStorage.getItem('theme');
@@ -334,6 +345,7 @@
       SCENARIOS: {{ scenarios|tojson }},
       OSV_SUPPORTED: {{ osv_supported|tojson }},
       AI_CONFIGURED: {{ ai_configured|tojson }},
+      AUTH_REQUIRED: {{ auth_required|tojson }},
     };
   </script>
   <script src="{{ url_for('static', filename='app.js') }}"></script>

@@ -80,10 +80,16 @@ CLASSIFIER_VERSION = "2"
 
 class AIError(RuntimeError):
     def __init__(self, message: str, status: int | None = None,
-                 retryable: bool = False):
+                 retryable: bool = False, *, public_message: str | None = None):
         super().__init__(message)
         self.status = status
         self.retryable = retryable
+        if public_message:
+            self.public_message = public_message
+        elif status is not None:
+            self.public_message = f"AI provider returned HTTP {status}"
+        else:
+            self.public_message = "AI request failed"
 
 
 @dataclass
@@ -208,18 +214,34 @@ def _call_messages(cfg: AIConfig, system: str, user: str,
             body = resp.read().decode("utf-8")
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")[:500]
-        raise AIError(f"AI HTTP {e.code}: {detail}", status=e.code,
-                      retryable=e.code in RETRYABLE_STATUS) from e
+        logger.warning("AI provider HTTP %s: %s", e.code, detail)
+        raise AIError(
+            f"AI HTTP {e.code}: {detail}",
+            status=e.code,
+            retryable=e.code in RETRYABLE_STATUS,
+            public_message=f"AI provider returned HTTP {e.code}",
+        ) from e
     except urllib.error.URLError as e:
         # Network-level failure (DNS, connection reset, timeout) — transient.
-        raise AIError(f"AI request failed: {e.reason}", retryable=True) from e
+        raise AIError(
+            f"AI request failed: {e.reason}",
+            retryable=True,
+            public_message="AI request failed",
+        ) from e
     except TimeoutError as e:
-        raise AIError("AI request timed out", retryable=True) from e
+        raise AIError(
+            "AI request timed out",
+            retryable=True,
+            public_message="AI request failed",
+        ) from e
 
     try:
         obj = json.loads(body)
     except json.JSONDecodeError as e:
-        raise AIError(f"AI returned non-JSON: {body[:300]}") from e
+        raise AIError(
+            f"AI returned non-JSON: {body[:300]}",
+            public_message="AI returned an unreadable reply",
+        ) from e
 
     # Anthropic shape: {"content":[{"type":"text","text":"..."}], ...}
     content = obj.get("content")
@@ -238,9 +260,17 @@ def _call_messages(cfg: AIConfig, system: str, user: str,
         # reasoning_content, leaving content empty.  Retryable because a
         # second attempt with more headroom usually succeeds.
         if msg.get("reasoning_content") and not (text and text.strip()):
-            raise AIError("reasoning model returned empty content (thinking "
-                          "used all tokens)", retryable=True)
-    raise AIError(f"unexpected AI response shape: {body[:300]}", retryable=True)
+            raise AIError(
+                "reasoning model returned empty content (thinking "
+                "used all tokens)",
+                retryable=True,
+                public_message="AI returned an unreadable reply",
+            )
+    raise AIError(
+        f"unexpected AI response shape: {body[:300]}",
+        retryable=True,
+        public_message="AI returned an unreadable reply",
+    )
 
 
 def _call_messages_retrying(cfg: AIConfig, system: str, user: str,
@@ -285,7 +315,8 @@ def ping(cfg: AIConfig | None = None) -> dict:
         return {"ok": True, "model": cfg.model, "reply": reply[:60],
                 "keys": len(cfg.tokens)}
     except AIError as e:
-        return {"ok": False, "error": str(e)}
+        logger.warning("AI ping failed: %s", e)
+        return {"ok": False, "error": e.public_message}
 
 
 # ---------------------------------------------------------------------------
@@ -429,12 +460,19 @@ def _parse_verdict(text: str) -> dict:
     start = text.find("{")
     end = text.rfind("}")
     if start == -1 or end == -1 or end < start:
-        raise AIError(f"no JSON object in AI reply: {text[:200] or '(empty)'}",
-                      retryable=True)
+        raise AIError(
+            f"no JSON object in AI reply: {text[:200] or '(empty)'}",
+            retryable=True,
+            public_message="AI returned an unreadable reply",
+        )
     try:
         obj = json.loads(text[start : end + 1])
     except json.JSONDecodeError as e:
-        raise AIError(f"malformed JSON in AI reply: {e}", retryable=True) from e
+        raise AIError(
+            f"malformed JSON in AI reply: {e}",
+            retryable=True,
+            public_message="AI returned an unreadable reply",
+        ) from e
     return {
         "is_match": _coerce_bool(obj.get("is_match")),
         "confidence": _coerce_confidence(obj.get("confidence", 0.0)),
@@ -522,13 +560,14 @@ def classify_many(
         try:
             return gid, classify_one(cfg, adv, category, token_offset=key_offset)
         except AIError as e:
-            return gid, {"error": str(e), "is_match": None,
+            logger.warning("classify failed for %s: %s", gid, e)
+            return gid, {"error": e.public_message, "is_match": None,
                          "confidence": 0.0, "cached": False}
-        except Exception as e:
+        except Exception:
             # Any unexpected bug must degrade to a per-advisory error verdict,
             # not propagate through fut.result() and sink the whole batch.
             logger.exception("unexpected classify error for %s", gid)
-            return gid, {"error": str(e), "is_match": None,
+            return gid, {"error": "classification failed", "is_match": None,
                          "confidence": 0.0, "cached": False}
 
     with ThreadPoolExecutor(max_workers=workers) as ex:

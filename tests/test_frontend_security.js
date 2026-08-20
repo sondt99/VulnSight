@@ -25,6 +25,9 @@ for (const value of ['=2+2', '+CMD', '-1+2', '@SUM(A1:A2)', '  =HYPERLINK("x")']
 
 assert.equal(csvCell('\tformula-like'), "'\tformula-like");
 assert.equal(csvCell('ordinary text'), 'ordinary text');
+assert.match(appSource, /function apiPost/);
+assert.match(appSource, /X-VulnSight-Token/);
+assert.match(appSource, /AUTH_REQUIRED/);
 assert.equal(csvCell('alpha,beta'), '"alpha,beta"');
 assert.equal(csvCell('say "hello"'), '"say ""hello"""');
 

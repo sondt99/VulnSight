@@ -4,6 +4,9 @@
 #   GH_TOKEN=$(gh auth token) docker compose up --build
 #   open http://127.0.0.1:5000
 #
+# The published port is loopback-only. To listen on the LAN, change the
+# ports bind to 0.0.0.0 and set VULNSIGHT_API_TOKEN in .env.
+#
 # GHSA fetches go through `gh`. A host `gh auth login` keeps the token in the
 # OS keyring, which the container cannot read — export GH_TOKEN (or put it in
 # .env) instead of mounting ~/.config/gh.
@@ -17,7 +20,7 @@ services:
     build: .
     image: vulnsight:local
     ports:
-      - "${PORT:-5000}:5000"
+      - "127.0.0.1:${PORT:-5000}:5000"
     env_file:
       - path: .env
         required: false

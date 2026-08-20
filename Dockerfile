@@ -41,6 +41,8 @@ EXPOSE 5000
 VOLUME ["/data"]
 
 ENTRYPOINT ["/entrypoint.sh"]
+# Bind every interface *inside* the container. Compose publishes
+# 127.0.0.1:5000; do not map 0.0.0.0:5000 without VULNSIGHT_API_TOKEN.
 CMD ["gunicorn", \
      "--bind", "0.0.0.0:5000", \
      "--workers", "1", \

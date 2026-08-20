@@ -284,6 +284,8 @@ class TestRunSearch(unittest.TestCase):
             with self.assertRaises(search_service.SearchError) as cm:
                 search_service.run_search(q)
         self.assertEqual(cm.exception.status, 502)
+        self.assertEqual(str(cm.exception), "GHSA fetch failed.")
+        self.assertNotIn("nope", str(cm.exception))
 
     def test_ghsa_failure_with_other_sources_is_warning(self):
         q = search_service.parse_search_query(
@@ -293,6 +295,7 @@ class TestRunSearch(unittest.TestCase):
              mock.patch("modules.osv_client.fetch_osv", return_value=[]):
             out = search_service.run_search(q)
         self.assertTrue(any("GHSA fetch failed" in w for w in out.warnings))
+        self.assertFalse(any("nope" in w for w in out.warnings))
         self.assertNotIn("ghsa", out.per_source)
         self.assertEqual(out.per_source.get("osv"), 0)
         self.assertEqual(out.results, [])

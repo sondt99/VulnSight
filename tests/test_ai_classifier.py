@@ -13,6 +13,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import unittest
 from unittest import mock
 
+import io
+import urllib.error
+
 from modules import ai_classifier
 from modules import ghsa_client as ghsa
 from samples import SAMPLE
@@ -235,7 +238,8 @@ class TestClassify(unittest.TestCase):
             with self.assertLogs("modules.ai_classifier", level="ERROR"):
                 res = ai_classifier.classify_many(cfg, advs, "bac")
         self.assertIn("error", res["A"])
-        self.assertIn("kaboom", res["A"]["error"])
+        self.assertEqual(res["A"]["error"], "classification failed")
+        self.assertNotIn("kaboom", res["A"]["error"])
         self.assertIsNone(res["A"]["is_match"])
 
     def test_glm_payload_disables_thinking(self):
@@ -262,6 +266,37 @@ class TestClassify(unittest.TestCase):
             out = ai_classifier._call_messages(cfg, "sys", "user")
         self.assertEqual(out, "PONG")
         self.assertEqual(captured["body"]["thinking"], {"type": "disabled"})
+
+    def test_ping_strips_provider_error_body(self):
+        cfg = self._cfg()
+        err = urllib.error.HTTPError(
+            url="https://x/v1/messages",
+            code=401,
+            msg="Unauthorized",
+            hdrs=None,
+            fp=io.BytesIO(b'{"error":"invalid api_key sk-secret-abc"}'),
+        )
+        with mock.patch("urllib.request.urlopen", side_effect=err):
+            result = ai_classifier.ping(cfg)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "AI provider returned HTTP 401")
+        self.assertNotIn("sk-secret-abc", json.dumps(result))
+        self.assertNotIn("invalid api_key", result["error"])
+
+    def test_classify_many_strips_provider_error_body(self):
+        cfg = self._cfg()
+        advs = [ghsa.normalize(dict(SAMPLE, ghsa_id="A"))]
+        err = urllib.error.HTTPError(
+            url="https://x/v1/messages",
+            code=403,
+            msg="Forbidden",
+            hdrs=None,
+            fp=io.BytesIO(b'{"error":"token ghp_LEAKED rejected"}'),
+        )
+        with mock.patch("urllib.request.urlopen", side_effect=err):
+            res = ai_classifier.classify_many(cfg, advs, "bac")
+        self.assertEqual(res["A"]["error"], "AI provider returned HTTP 403")
+        self.assertNotIn("ghp_LEAKED", json.dumps(res))
 
     def test_classify_workers_follow_key_count(self):
         eight = ai_classifier.AIConfig("glm", "https://x", ["k"] * 8, "m")

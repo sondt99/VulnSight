@@ -931,6 +931,51 @@ button.warn-btn:hover:not(:disabled) { border-color: var(--warn); }
 .toast.err { border-left-color: var(--bad); }
 .toast.ok { border-left-color: var(--ok); }
 
+.auth-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--scrim-bg);
+}
+.auth-gate[hidden] { display: none !important; }
+.auth-gate-card {
+  width: min(420px, 100%);
+  padding: 22px 22px 20px;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.auth-gate-card h2 { margin: 6px 0 8px; font-size: 22px; }
+.auth-gate-card p { margin: 0 0 16px; color: var(--muted); font-size: 13.5px; line-height: 1.5; }
+.auth-gate-card label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font: 650 11px/1.25 var(--sans);
+}
+.auth-gate-card input[type="password"] {
+  width: 100%;
+  min-height: 38px;
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  color: var(--ink);
+  background-color: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+.auth-gate-card button {
+  width: 100%;
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
 code {
   padding: 1px 5px;
   color: var(--ink);

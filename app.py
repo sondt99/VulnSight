@@ -16,7 +16,7 @@ import sys
 
 from flask import Flask, g, jsonify, render_template, request
 
-from modules import ai_classifier, cache, config, osv_client, search_service
+from modules import ai_classifier, cache, config, osv_client, search_service, security
 from modules import ghsa_client as ghsa
 from modules.cwe_categories import (
     CATEGORIES,
@@ -55,6 +55,19 @@ def create_app():
     except ValueError:
         _max_request_bytes = 1048576
     app.config["MAX_CONTENT_LENGTH"] = max(1024, _max_request_bytes)
+    app.config["VULNSIGHT_TOKEN"] = os.environ.get("VULNSIGHT_API_TOKEN", "").strip()
+    app.config["PUBLIC_HOSTS"] = security.public_hosts_from_env()
+    _rate_off = os.environ.get("VULNSIGHT_RATE_LIMIT", "on").strip().lower() in (
+        "0", "off", "false", "no",
+    )
+    app.config["RATE_LIMIT_ENABLED"] = not _rate_off
+    _rate_window = security.env_int("VULNSIGHT_RATE_WINDOW", 60)
+    app.config["SEARCH_LIMITER"] = security.RateLimiter(
+        security.env_int("VULNSIGHT_SEARCH_RATE", 30), _rate_window
+    )
+    app.config["AI_LIMITER"] = security.RateLimiter(
+        security.env_int("VULNSIGHT_AI_RATE", 20), _rate_window
+    )
 
     # -----------------------------------------------------------------------
     # Request lifecycle hooks
@@ -62,10 +75,49 @@ def create_app():
 
     @app.before_request
     def _csrf_check():
-        if request.method in ("POST", "PUT", "DELETE"):
-            origin = request.headers.get("Origin", "")
-            if origin and not origin.startswith(("http://127.0.0.1", "http://localhost")):
-                return jsonify({"error": "Cross-origin request blocked."}), 403
+        if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
+            return None
+        if security.mutating_request_allowed(
+            origin=request.headers.get("Origin"),
+            referer=request.headers.get("Referer"),
+            host=request.host,
+            sec_fetch_site=request.headers.get("Sec-Fetch-Site"),
+            extra_hosts=app.config.get("PUBLIC_HOSTS") or [],
+        ):
+            return None
+        return jsonify({"error": "Cross-origin request blocked."}), 403
+
+    @app.before_request
+    def _rate_limit():
+        if request.method != "POST" or not app.config.get("RATE_LIMIT_ENABLED", True):
+            return None
+        limiter = None
+        if request.path == "/api/search":
+            limiter = app.config.get("SEARCH_LIMITER")
+        elif request.path in ("/api/ai/classify", "/api/ai/test"):
+            limiter = app.config.get("AI_LIMITER")
+        if limiter is None:
+            return None
+        if limiter.allow(request.remote_addr or "unknown"):
+            return None
+        return jsonify({"error": "Too many requests. Try again shortly."}), 429
+
+    @app.before_request
+    def _auth_check():
+        if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
+            return None
+        if not request.path.startswith("/api/"):
+            return None
+        expected = app.config.get("VULNSIGHT_TOKEN") or ""
+        if not expected:
+            return None
+        provided = security.extract_request_token(
+            request.headers.get("X-VulnSight-Token"),
+            request.headers.get("Authorization"),
+        )
+        if security.token_matches(expected, provided):
+            return None
+        return jsonify({"error": "Authentication required."}), 401
 
     @app.before_request
     def create_csp_nonce():
@@ -130,6 +182,7 @@ def create_app():
             gh_ok=ghsa.gh_auth_ok(),
             cached_count=cache.count_advisories(),
             csp_nonce=g.csp_nonce,
+            auth_required=bool(app.config.get("VULNSIGHT_TOKEN")),
         )
 
     # -----------------------------------------------------------------------
@@ -305,6 +358,7 @@ if __name__ == "__main__":
     app = create_app()
     port = int(os.environ.get("PORT", "5000"))
     host = os.environ.get("HOST", "127.0.0.1").strip() or "127.0.0.1"
+    security.assert_safe_bind(host)
     debug = "--debug" in sys.argv
     print(f"  VulnSight -> http://{host}:{port}")
     app.run(host=host, port=port, debug=debug)

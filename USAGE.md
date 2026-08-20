@@ -19,7 +19,7 @@ useful because umbrella CWEs like `CWE-284` are often too vague.
 
 ```bash
 cd VulnSight
-cp .env.example .env      # then edit AI_TOKEN (already filled for you)
+cp .env.example .env      # then put YOUR own AI token in .env (never commit it)
 ./run.sh                  # creates venv, installs Flask, launches
 # open http://127.0.0.1:5000
 ```
@@ -151,5 +151,7 @@ cd VulnSight
   your **max results** so cost stays bounded.
 - `affects` (package) is an **exact** match, e.g. `org.apache.tomcat:tomcat`.
 - AI calls run 6-wide concurrently; verdicts persist per `(advisory, category)`.
-- The token lives only in `.env` (git-ignored). The AI request goes to the
-  `AI_BASE_URL` you configure — nowhere else.
+- The token lives only in `.env` (git-ignored). `./run.sh` chmods `.env` to
+  `0600`. The AI request goes to the `AI_BASE_URL` you configure — nowhere else.
+- Docker publishes `127.0.0.1:5000` only. Optional `VULNSIGHT_API_TOKEN` in
+  `.env` requires `X-VulnSight-Token` on POST `/api/*`.

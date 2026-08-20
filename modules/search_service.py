@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import re
 from dataclasses import dataclass
 
@@ -15,6 +16,8 @@ from . import nvd_client
 from . import osv_client
 from .cwe_categories import CATEGORIES, ECOSYSTEMS, SEVERITIES, cwe_label, normalize_cwe_id, resolve_cwes
 from .query_filters import matches_common_filters, valid_published_filter
+
+logger = logging.getLogger(__name__)
 
 VALID_SORTS = ("published", "updated", "cve_id", "epss_percentage", "epss_percentile")
 VALID_DIRECTIONS = ("asc", "desc")
@@ -441,9 +444,10 @@ def run_search(q: SearchQuery) -> SearchOutcome:
             collected += g
             per_source["ghsa"] = len(g)
         except ghsa.GhCliError as e:
+            logger.warning("GHSA fetch failed: %s", e)
             if q.sources == ["ghsa"]:
-                raise SearchError(f"GHSA fetch failed: {e}", 502)
-            warnings.append(f"GHSA fetch failed: {e}")
+                raise SearchError("GHSA fetch failed.", 502)
+            warnings.append("GHSA fetch failed.")
 
     # --- OSV (local CWE filter over the bulk export) ---
     if "osv" in q.sources:
@@ -461,7 +465,8 @@ def run_search(q: SearchQuery) -> SearchOutcome:
                 collected += o
                 per_source["osv"] = len(o)
             except osv_client.OsvError as e:
-                warnings.append(f"OSV fetch failed: {e}")
+                logger.warning("OSV fetch failed: %s", e)
+                warnings.append("OSV fetch failed.")
 
     # --- NVD (server-side CWE filter via NIST API v2) ---
     if "nvd" in q.sources:
@@ -477,9 +482,10 @@ def run_search(q: SearchQuery) -> SearchOutcome:
             collected += n
             per_source["nvd"] = len(n)
         except nvd_client.NvdError as e:
+            logger.warning("NVD fetch failed: %s", e)
             if q.sources == ["nvd"]:
-                raise SearchError(f"NVD fetch failed: {e}", 502)
-            warnings.append(f"NVD fetch failed: {e}")
+                raise SearchError("NVD fetch failed.", 502)
+            warnings.append("NVD fetch failed.")
 
     # --- OSV native (no CWE) — needs the AI pass to be useful ---
     if "osv-native" in q.sources:
@@ -504,7 +510,8 @@ def run_search(q: SearchQuery) -> SearchOutcome:
                         f"'Refine with AI' to classify them."
                     )
             except osv_client.OsvError as e:
-                warnings.append(f"OSV native fetch failed: {e}")
+                logger.warning("OSV native fetch failed: %s", e)
+                warnings.append("OSV native fetch failed.")
 
     results = merge_advisories(collected)
     results = [

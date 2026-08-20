@@ -7,8 +7,10 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import io
 import tempfile
 import unittest
+import urllib.error
 from unittest import mock
 
 from modules import ai_classifier
@@ -27,12 +29,20 @@ class TestFlaskApp(unittest.TestCase):
         self.tmp.close()
         self._orig_db = cache.DB_PATH
         cache.DB_PATH = self.tmp.name
+        # Isolate these tests from a developer .env that enables auth/limits.
+        self._sec_env = mock.patch.dict(os.environ, {
+            "VULNSIGHT_API_TOKEN": "",
+            "VULNSIGHT_RATE_LIMIT": "off",
+            "VULNSIGHT_PUBLIC_HOST": "",
+        }, clear=False)
+        self._sec_env.start()
         from app import create_app
         self.app = create_app()
         self.app.config["TESTING"] = True
         self.client = self.app.test_client()
 
     def tearDown(self):
+        self._sec_env.stop()
         cache.DB_PATH = self._orig_db
         for ext in ["", "-wal", "-shm"]:
             try:
@@ -106,6 +116,8 @@ class TestFlaskApp(unittest.TestCase):
         with mock.patch("modules.ghsa_client.fetch_advisories", side_effect=ghsa.GhCliError("nope")):
             r = self.client.post("/api/search", json={"categories": ["bac"]})
         self.assertEqual(r.status_code, 502)
+        self.assertEqual(r.get_json()["error"], "GHSA fetch failed.")
+        self.assertNotIn("nope", r.get_data(as_text=True))
 
     def test_mutating_apis_require_json_content_type(self):
         r = self.client.post(
@@ -329,6 +341,7 @@ class TestFlaskApp(unittest.TestCase):
             "summary", "ai-btn", "retry-btn", "only_match", "export-btn",
             "results", "ai-test-pill", "filters-toggle", "filters-close",
             "filter-scrim",
+            "auth-gate", "auth-token", "auth-save",
         ]
         for element_id in required_ids:
             self.assertEqual(html.count(f'id="{element_id}"'), 1, element_id)
@@ -342,6 +355,7 @@ class TestFlaskApp(unittest.TestCase):
         self.assertIn('value="epss_percentage"', html)
         self.assertIn('value="epss_percentile"', html)
         self.assertIn('id="theme-toggle"', html)
+        self.assertIn("AUTH_REQUIRED: false", html)
 
     def test_static_assets_served(self):
         css = self.client.get("/static/style.css")
@@ -377,6 +391,94 @@ class TestFlaskApp(unittest.TestCase):
             )
         self.assertEqual(r.status_code, 200)
 
+    def test_csrf_blocks_prefix_lookalike_origins(self):
+        for origin in (
+            "http://localhost.evil.com",
+            "http://localhostevil.com",
+            "http://127.0.0.1.attacker.com",
+            "http://127.0.0.1.example",
+            "http://127.0.0.1:5000.evil.com",
+        ):
+            with self.subTest(origin=origin):
+                r = self.client.post(
+                    "/api/search",
+                    json={"categories": ["bac"]},
+                    headers={"Origin": origin},
+                )
+                self.assertEqual(r.status_code, 403, origin)
+
+    def test_csrf_blocks_cross_site_fetch_metadata(self):
+        r = self.client.post(
+            "/api/search",
+            json={"categories": ["bac"]},
+            headers={"Sec-Fetch-Site": "cross-site"},
+        )
+        self.assertEqual(r.status_code, 403)
+
+    def test_csrf_blocks_evil_referer_without_origin(self):
+        r = self.client.post(
+            "/api/search",
+            json={"categories": ["bac"]},
+            headers={"Referer": "http://evil.example/page"},
+        )
+        self.assertEqual(r.status_code, 403)
+
+    def test_search_ghsa_error_does_not_leak_cli_stderr(self):
+        with mock.patch(
+            "modules.ghsa_client.fetch_advisories",
+            side_effect=ghsa.GhCliError("token ghp_LEAKED"),
+        ):
+            r = self.client.post("/api/search", json={"categories": ["bac"]})
+        self.assertEqual(r.status_code, 502)
+        body = r.get_data(as_text=True)
+        self.assertNotIn("ghp_LEAKED", body)
+        self.assertEqual(r.get_json()["error"], "GHSA fetch failed.")
+
+    def test_ai_test_hides_provider_error_body(self):
+        cfg = ai_classifier.AIConfig("glm", "https://x", ["tok"], "m")
+        err = urllib.error.HTTPError(
+            url="https://x/chat/completions",
+            code=401,
+            msg="Unauthorized",
+            hdrs=None,
+            fp=io.BytesIO(b'{"error":"invalid api_key sk-secret-abc"}'),
+        )
+        with mock.patch("modules.ai_classifier.load_config", return_value=cfg), \
+             mock.patch("urllib.request.urlopen", side_effect=err):
+            r = self.client.post("/api/ai/test", json={})
+        self.assertEqual(r.status_code, 200)
+        body = r.get_data(as_text=True)
+        self.assertFalse(r.get_json()["ok"])
+        self.assertEqual(r.get_json()["error"], "AI provider returned HTTP 401")
+        self.assertNotIn("sk-secret-abc", body)
+        self.assertNotIn("invalid api_key", body)
+
+    def test_ai_classify_hides_provider_error_body(self):
+        cache.upsert_advisories([ghsa.normalize(SAMPLE)], cache.DB_PATH)
+        cfg = ai_classifier.AIConfig("glm", "https://x", ["tok"], "m")
+        err = urllib.error.HTTPError(
+            url="https://x/chat/completions",
+            code=403,
+            msg="Forbidden",
+            hdrs=None,
+            fp=io.BytesIO(b'{"error":"token ghp_LEAKED rejected"}'),
+        )
+        with mock.patch("modules.ai_classifier.load_config", return_value=cfg), \
+             mock.patch("urllib.request.urlopen", side_effect=err):
+            r = self.client.post(
+                "/api/ai/classify",
+                json={"category": "bac", "advisory_ids": [SAMPLE["ghsa_id"]]},
+            )
+        self.assertEqual(r.status_code, 200)
+        body = r.get_data(as_text=True)
+        data = r.get_json()
+        self.assertEqual(
+            data["by_category"]["bac"][SAMPLE["ghsa_id"]]["error"],
+            "AI provider returned HTTP 403",
+        )
+        self.assertIn("AI provider returned HTTP 403", data["verdicts"][SAMPLE["ghsa_id"]]["error"])
+        self.assertNotIn("ghp_LEAKED", body)
+
     def test_index_csp_nonce_matches_header(self):
         with mock.patch("modules.ghsa_client.gh_auth_ok", return_value=False):
             r = self.client.get("/")
@@ -386,6 +488,115 @@ class TestFlaskApp(unittest.TestCase):
         nonce = html.split(marker, 1)[1].split('"', 1)[0]
         self.assertGreaterEqual(len(nonce), 20)
         self.assertIn(f"'nonce-{nonce}'", csp)
+
+
+class TestAppAuthAndLimits(unittest.TestCase):
+    def _make(self, env):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self._orig_db = cache.DB_PATH
+        cache.DB_PATH = self.tmp.name
+        merged = {
+            "VULNSIGHT_API_TOKEN": "",
+            "VULNSIGHT_RATE_LIMIT": "on",
+            "VULNSIGHT_PUBLIC_HOST": "",
+            "VULNSIGHT_SEARCH_RATE": "30",
+            "VULNSIGHT_AI_RATE": "20",
+            "VULNSIGHT_RATE_WINDOW": "60",
+        }
+        merged.update(env)
+        self._env = mock.patch.dict(os.environ, merged, clear=False)
+        self._env.start()
+        from app import create_app
+        self.app = create_app()
+        self.app.config["TESTING"] = True
+        self.client = self.app.test_client()
+
+    def tearDown(self):
+        if hasattr(self, "_env"):
+            self._env.stop()
+        if hasattr(self, "_orig_db"):
+            cache.DB_PATH = self._orig_db
+        if hasattr(self, "tmp"):
+            for ext in ["", "-wal", "-shm"]:
+                try:
+                    os.unlink(self.tmp.name + ext)
+                except OSError:
+                    pass
+
+    def test_token_required_on_post_not_get(self):
+        self._make({"VULNSIGHT_API_TOKEN": "test-secret-token"})
+        self.assertEqual(
+            self.client.post("/api/search", json={"categories": ["bac"]}).status_code,
+            401,
+        )
+        self.assertEqual(self.client.get("/api/meta").status_code, 200)
+        with mock.patch("modules.ghsa_client.gh_auth_ok", return_value=False):
+            html = self.client.get("/").get_data(as_text=True)
+        self.assertIn("AUTH_REQUIRED: true", html)
+        self.assertNotIn("test-secret-token", html)
+        with mock.patch("modules.ghsa_client.fetch_advisories", return_value=[SAMPLE]):
+            ok = self.client.post(
+                "/api/search",
+                json={"categories": ["bac"], "ecosystem": "maven"},
+                headers={"X-VulnSight-Token": "test-secret-token"},
+            )
+            bearer = self.client.post(
+                "/api/search",
+                json={"categories": ["bac"], "ecosystem": "maven"},
+                headers={"Authorization": "Bearer test-secret-token"},
+            )
+        self.assertEqual(ok.status_code, 200)
+        self.assertEqual(bearer.status_code, 200)
+        self.assertEqual(
+            self.client.post(
+                "/api/search",
+                json={"categories": ["bac"]},
+                headers={"X-VulnSight-Token": "wrong"},
+            ).status_code,
+            401,
+        )
+
+    def test_csrf_allows_configured_public_host(self):
+        self._make({"VULNSIGHT_PUBLIC_HOST": "vulnsight.example"})
+        with mock.patch("modules.ghsa_client.fetch_advisories", return_value=[SAMPLE]):
+            r = self.client.post(
+                "/api/search",
+                json={"categories": ["bac"], "ecosystem": "maven"},
+                headers={"Origin": "https://vulnsight.example"},
+            )
+        self.assertEqual(r.status_code, 200)
+
+    def test_search_rate_limit(self):
+        self._make({"VULNSIGHT_SEARCH_RATE": "1", "VULNSIGHT_RATE_WINDOW": "60"})
+        with mock.patch("modules.ghsa_client.fetch_advisories", return_value=[SAMPLE]):
+            first = self.client.post(
+                "/api/search", json={"categories": ["bac"], "ecosystem": "maven"}
+            )
+            second = self.client.post(
+                "/api/search", json={"categories": ["bac"], "ecosystem": "maven"}
+            )
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 429)
+
+    def test_unauthenticated_posts_are_rate_limited(self):
+        self._make({
+            "VULNSIGHT_API_TOKEN": "secret",
+            "VULNSIGHT_SEARCH_RATE": "1",
+            "VULNSIGHT_RATE_WINDOW": "60",
+        })
+        first = self.client.post("/api/search", json={"categories": ["bac"]})
+        second = self.client.post("/api/search", json={"categories": ["bac"]})
+        self.assertEqual(first.status_code, 401)
+        self.assertEqual(second.status_code, 429)
+
+    def test_ai_rate_limit(self):
+        self._make({"VULNSIGHT_AI_RATE": "1", "VULNSIGHT_RATE_WINDOW": "60"})
+        with mock.patch("modules.ai_classifier.ping", return_value={"ok": True}):
+            first = self.client.post("/api/ai/test", json={})
+            second = self.client.post("/api/ai/test", json={})
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 429)
 
 
 if __name__ == "__main__":

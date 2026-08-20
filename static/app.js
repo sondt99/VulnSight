@@ -1,5 +1,5 @@
 // === Configuration & State ===
-const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
+const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window.BOOT;
     const $ = (s) => document.querySelector(s);
     const $$ = (s) => Array.from(document.querySelectorAll(s));
     let LAST = [];           // last result set (normalized advisories)
@@ -77,6 +77,55 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       t.setAttribute('aria-live', kind === 'err' ? 'assertive' : 'polite');
       document.body.appendChild(t);
       setTimeout(() => t.remove(), 5000);
+    }
+
+    function showAuthGate(msg) {
+      const gate = $('#auth-gate');
+      if (!gate) return;
+      gate.hidden = false;
+      const hint = $('#auth-gate-hint');
+      if (hint && msg) hint.textContent = msg;
+      const input = $('#auth-token');
+      if (input) {
+        input.value = '';
+        requestAnimationFrame(() => input.focus());
+      }
+    }
+
+    function hideAuthGate() {
+      const gate = $('#auth-gate');
+      if (gate) gate.hidden = true;
+    }
+
+    function saveAuthToken() {
+      const input = $('#auth-token');
+      const value = (input && input.value || '').trim();
+      if (!value) { toast('Enter the API token', 'err'); return; }
+      sessionStorage.setItem('vulnsight_token', value);
+      hideAuthGate();
+      toast('Token saved for this tab', 'ok');
+    }
+
+    async function apiPost(url, payload) {
+      const headers = {'content-type': 'application/json'};
+      const token = sessionStorage.getItem('vulnsight_token') || '';
+      if (token) headers['X-VulnSight-Token'] = token;
+      const r = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload === undefined ? {} : payload),
+      });
+      let data = {};
+      try { data = await r.json(); } catch (_) { data = {}; }
+      if (r.status === 401) {
+        sessionStorage.removeItem('vulnsight_token');
+        if (AUTH_REQUIRED) {
+          showAuthGate('That token was rejected. Check VULNSIGHT_API_TOKEN.');
+        }
+        throw new Error(data.error || 'Authentication required.');
+      }
+      if (!r.ok) throw new Error(data.error || ('request failed (' + r.status + ')'));
+      return data;
     }
 
     function esc(s) {
@@ -283,9 +332,7 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
         $('#results').innerHTML = `<div class="loading"><span class="spinner"></span>Fetching… (OSV may download a ~10MB list on first use)</div>`;
       }
       try {
-        const r = await fetch('/api/search', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(payload)});
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.error || 'search failed');
+        const data = await apiPost('/api/search', payload);
         LAST = data.results;
         AI = {};
         LAST.forEach(a => { if (a.ai) AI[a.advisory_id] = a.ai; });
@@ -317,10 +364,10 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       const cats = selectedCategories();
       for (let offset = 0; offset < ids.length; offset += 100) {
         const batch = ids.slice(offset, offset + 100);
-        const r = await fetch('/api/ai/classify', {method:'POST', headers:{'content-type':'application/json'},
-          body: JSON.stringify({categories: cats.length ? cats : ['bac'], advisory_ids: batch})});
-        const data = await r.json();
-        if (!r.ok) throw new Error(data.error || 'AI failed');
+        const data = await apiPost('/api/ai/classify', {
+          categories: cats.length ? cats : ['bac'],
+          advisory_ids: batch,
+        });
         Object.assign(AI, data.verdicts);
       }
       return ids.filter(id => AI[id] && (AI[id].error || AI[id].has_errors)).length;
@@ -385,12 +432,7 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
       const pill = $('#ai-test-pill');
       pill.textContent = '⚡ testing…';
       try {
-        const r = await fetch('/api/ai/test', {
-          method: 'POST',
-          headers: {'content-type': 'application/json'},
-          body: '{}',
-        });
-        const d = await r.json();
+        const d = await apiPost('/api/ai/test', {});
         if (d.ok) { pill.textContent = '⚡ AI OK'; toast('AI reachable ('+d.model+'): '+d.reply, 'ok'); }
         else { pill.textContent = '⚡ AI fail'; toast('AI test failed: '+d.error, 'err'); }
       } catch (e) { pill.textContent = '⚡ AI fail'; toast(e.message, 'err'); }
@@ -561,3 +603,10 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED } = window.BOOT;
     refreshPackages();
     updateExtraCount();
     updateActionButtons();
+    if (AUTH_REQUIRED) {
+      $('#auth-save').addEventListener('click', saveAuthToken);
+      $('#auth-token').addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); saveAuthToken(); }
+      });
+      if (!sessionStorage.getItem('vulnsight_token')) showAuthGate();
+    }

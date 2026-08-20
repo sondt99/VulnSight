@@ -22,8 +22,10 @@ elif ! gh auth status >/dev/null 2>&1; then
   echo "!! gh not authenticated. Run: gh auth login"
 fi
 
-if [ ! -f .env ]; then
-  echo "!! No .env found — copy .env.example and add your AI_TOKEN for AI."
+if [ -f .env ]; then
+  chmod 600 .env 2>/dev/null || true
+else
+  echo "!! No .env found — copy .env.example and add your own AI token for AI."
 fi
 
 echo "==> Starting server on http://127.0.0.1:${PORT:-5000}"
