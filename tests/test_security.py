@@ -1,6 +1,7 @@
 """Unit tests for CSRF origin parsing, bind guards, tokens, and rate limits."""
 
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -228,12 +229,42 @@ class TestRateLimiter(unittest.TestCase):
 
 
 class TestDocsHygiene(unittest.TestCase):
+    """Docs must not imply a token ships with the repo, and must not leak one."""
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def _doc_files(self):
+        names = [".env.example"]
+        for entry in sorted(os.listdir(self.ROOT)):
+            if entry.endswith(".md"):
+                names.append(entry)
+        docs = os.path.join(self.ROOT, "docs")
+        for entry in sorted(os.listdir(docs)):
+            if entry.endswith(".md"):
+                names.append(os.path.join("docs", entry))
+        return names
+
+    def test_every_doc_is_checked(self):
+        names = self._doc_files()
+        self.assertIn("README.md", names)
+        self.assertIn(os.path.join("docs", "configuration.md"), names)
+        self.assertGreaterEqual(len(names), 10)
+
     def test_docs_do_not_claim_prefilled_tokens(self):
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        for name in ("USAGE.md", "README.md", ".env.example"):
-            with open(os.path.join(root, name), encoding="utf-8") as fh:
+        for name in self._doc_files():
+            with open(os.path.join(self.ROOT, name), encoding="utf-8") as fh:
                 text = fh.read().lower()
             self.assertNotIn("already filled", text, name)
+
+    def test_docs_contain_no_token_shaped_strings(self):
+        # A doc is the easiest place to paste a real key by accident.
+        pattern = re.compile(
+            r"(sk-[a-z0-9]{16,}|ghp_[a-z0-9]{20,}|gho_[a-z0-9]{20,}"
+            r"|[a-f0-9]{32}\.[a-z0-9]{16,})", re.IGNORECASE)
+        for name in self._doc_files():
+            with open(os.path.join(self.ROOT, name), encoding="utf-8") as fh:
+                hit = pattern.search(fh.read())
+            self.assertIsNone(hit, f"{name}: possible credential {hit.group(0) if hit else ''}")
 
 
 if __name__ == "__main__":

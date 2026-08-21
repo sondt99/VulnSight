@@ -1,133 +1,96 @@
 # VulnSight
 
-**Browse the vulnerability advisory databases by *bug class*, not by keyword.**
+**Search vulnerability advisories by *bug class*, not by keyword.**
 
-VulnSight queries the [GitHub Advisory Database](https://github.com/advisories)
-(GHSA) and [OSV.dev](https://osv.dev), filters advisories by the **CWE set that
-defines each bug class** (Broken Access Control, SQL injection, XSS, SSTI, …),
-scopes them by **ecosystem and package**, and optionally runs an **LLM pass** to
-confirm each advisory really matches the class you asked for.
+Advisory titles are inconsistent. A real Broken Access Control bug is often
+written up without the words "BOLA", "BFLA" or "IDOR" appearing anywhere, so
+keyword search misses it silently — the worst failure mode for a triage tool,
+because the result looks like an answer.
 
-It grew out of a concrete need: *find BAC / BOLA / BFLA / IDOR advisories in Java
-(Maven) and Go, then expand to injection classes* — without drowning in the
-noise of advisories that never say "BOLA" in their title.
+Every reviewed advisory *is* tagged with one or more **CWE** IDs. VulnSight
+filters on the CWE set that characterises a bug class, merges GHSA + NVD +
+OSV.dev through their alias graph, and can then run an **LLM pass** that reads
+each advisory and states whether the root cause really is the class you asked
+for.
 
-## Why not just search by title?
+```
+you ask:  "Broken Access Control, Maven, last year"
+          → 15 CWEs → GHSA + NVD + OSV → merged & de-duplicated
+          → optional AI pass: is_match / confidence / vuln_type / reason
+          → CSV / JSON
+```
 
-Advisory titles are inconsistent — many real Broken Access Control bugs never
-contain the words "BOLA", "BFLA", or "IDOR", so keyword search silently misses
-them. But every reviewed advisory *is* tagged with one or more **CWE** IDs, so
-VulnSight filters on the CWE set that characterises each bug class instead. See
-[`modules/cwe_categories.py`](modules/cwe_categories.py) for the mappings.
-
-CWE tagging is still imperfect (umbrella CWEs like `CWE-284` are vague, and
-source-native records often carry no CWE at all). That's what the **AI refinement
-pass** is for: it reads each advisory and returns a structured verdict
-(`is_match / confidence / vuln_type / reason`) you can filter and sort on.
-
-## Features
-
-- **Bug-class → CWE filtering** across GHSA + NVD + OSV.dev, merged through
-  the full CVE/GHSA/OSV alias graph without discarding source metadata.
-- **Search the whole CWE catalog** — type a code (`639`), an official MITRE name
-  ("prototype pollution") or a community alias (`IDOR`, `BOLA`, `SSRF`, `XXE`)
-  and pick from all 944 weaknesses of CWE 4.20. Any single CWE becomes an ad-hoc
-  bug class that is both filtered on and AI-scored. The catalog is searched in
-  the browser, so results appear as you type.
-- **29 curated bug classes** in 7 groups — injection, access control, files and
-  server-side requests, crypto and secrets, memory and concurrency, availability
-  — each with a core/extended CWE split, an AI-prompt definition, and the
-  community terms people actually search for. The list is filterable in place.
-- **Recent searches** — the last 12 queries are restored with one click.
-- **Scope by** ecosystem (Maven/Go/npm/pip/…), package, severity, publish date.
-- **AI refinement** — confirm true matches across every selected bug class and surface source-native records
-  (`GO-`, `RUSTSEC-`, `PYSEC-`) that carry no CWE tag at all.
-- **Consistent filters** — publish date, package and severity are enforced on
-  normalized records from every source; long NVD date ranges are split safely.
-- **SQLite cache** — advisories and AI verdicts persist, so repeating a query is
-  fast and does not re-spend AI tokens. A verdict is keyed by a fingerprint of the
-  whole request, so changing the model or a class definition correctly retires the
-  verdicts that answered the old question.
-- **Export** the filtered list as CSV or JSON.
-- **Offline test suite** — 248 unit tests, no network or credentials required,
-  plus 21 optional browser tests that skip themselves without Playwright.
+---
 
 ## Quick start
 
 ```bash
-cd VulnSight
-cp .env.example .env      # then set AI_TOKEN for the AI pass (optional)
+cp .env.example .env      # optional: AI credentials for the "Refine with AI" pass
 ./run.sh                  # creates a venv, installs Flask, launches
 # open http://127.0.0.1:5000
 ```
 
-**Docker**
+Needs Python 3.9+ and the [`gh` CLI](https://cli.github.com/) authenticated
+(`gh auth login`) — every GHSA fetch goes through it.
+[Docker and configuration →](docs/getting-started.md)
 
-```bash
-cp .env.example .env                          # optional AI / NVD keys
-GH_TOKEN=$(gh auth token) docker compose up --build
-# open http://127.0.0.1:5000
-```
+## What you get
 
-Compose publishes the port on **loopback only** (`127.0.0.1:5000`). The
-container cannot reuse a host `gh auth login` (the token lives in the OS
-keyring). Pass `GH_TOKEN` on the command line or put it in `.env`. Advisory
-cache and OSV zips persist in the `vulnsight-data` volume.
+- **The whole CWE catalog is searchable.** Type a code (`639`), MITRE's official
+  name ("prototype pollution"), or a community alias (`IDOR`, `BOLA`, `SSRF`,
+  `XXE`) and pick from all **944 weaknesses of CWE 4.20**. The catalog is
+  searched in the browser — ~0.5 ms per keystroke, no round trip.
+- **29 curated bug classes** in 7 groups, each with a high-precision *core* CWE
+  set, a wider *extended* set, and the terms people actually type (`toctou`,
+  `__proto__`, `md5`, `webshell`). Any single CWE also works as an ad-hoc class
+  via `cwe:<id>` — filtered on *and* AI-scored.
+- **Four sources, one queue.** GHSA (server-side CWE filter), NVD (CVSS/CPE/KEV),
+  the OSV bulk export, and **OSV source-native records that carry no CWE at all**
+  and are only reachable through the AI path.
+- **An AI pass you can audit.** Each verdict carries the categories it was scored
+  against; change the query and the UI marks the old verdicts stale instead of
+  letting them filter your results.
+- **Costs are stated before they are spent.** The AI pass is metered
+  (`categories × advisories`), capped server-side, and every control that would
+  spend budget says so first.
+- **Exports that stand on their own** — CSV/JSON including which class matched
+  and whether scoring partially failed.
 
-If credentials are loaded and the process listens on a non-loopback address
-(Docker/gunicorn bind `0.0.0.0` inside the container), the app requires a
-token: set `VULNSIGHT_API_TOKEN` or accept the generated
-`.vulnsight_api_token` in the data directory. `python app.py` with `HOST`
-other than loopback refuses to start while credentials are loaded unless
-both `VULNSIGHT_EXPOSE=1` and `VULNSIGHT_API_TOKEN` are set, and refuses
-`--debug` off loopback.
+## Documentation
 
-**Requirements**
-
-- [`gh` CLI](https://cli.github.com/) installed and authenticated
-  (`gh auth login`) — used for all GHSA fetches.
-- Python 3.9+.
-- *(Optional)* AI credentials in `.env` to enable the **Refine with AI** button.
-
-### AI provider (optional)
-
-The AI pass talks to an Anthropic-Messages-compatible endpoint. Configure it in
-`.env` (never commit real tokens — `.env` is git-ignored):
-
-```shell
-CVE_AI_PROVIDER=anthropic
-AI_BASE_URL=https://your-ai-endpoint.example.com
-AI_TOKEN=<your token — keep it in .env only>
-AI_model=model-xyz
-```
-
-## Layout
-
-```
-app.py        thin Flask entry point (routes only)
-modules/      core logic: search orchestration, GHSA/OSV clients, CWE map,
-              CVSS scoring, SQLite cache, AI classifier
-static/       style.css + app.js
-templates/    index.html (page shell)
-tools/        generate_cwe_catalog.py — refresh the MITRE CWE table
-tests/        per-module offline unit tests, plus an optional browser suite
-requirements-dev.txt   Playwright, only for tests/test_ui_e2e.py
-```
+| | |
+|---|---|
+| [Getting started](docs/getting-started.md) | Install, Docker, requirements, first search |
+| [Configuration](docs/configuration.md) | Every environment variable, with defaults |
+| [Using the UI](docs/usage.md) | The full walkthrough, control by control |
+| [Bug classes](docs/bug-classes.md) | All 29 classes, and how to add one correctly |
+| [CWE catalog](docs/cwe-catalog.md) | Where the 944 CWEs come from, `cwe:<id>`, regeneration |
+| [Data sources](docs/data-sources.md) | GHSA / NVD / OSV / OSV-native, and honest coverage limits |
+| [AI classification](docs/ai-classification.md) | Prompt, verdict cache, key rotation, cost controls |
+| [HTTP API](docs/api.md) | Every endpoint, request and response shape |
+| [Architecture](docs/architecture.md) | Module map and the search pipeline end to end |
+| [Testing](docs/testing.md) | 270 offline tests + 21 browser tests, and how to verify a change |
+| [Operations](docs/operations.md) | Exposure, caches, quotas, troubleshooting |
+| [SECURITY.md](SECURITY.md) | Threat model and how to report a vulnerability |
 
 ## Tests
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -v   # 248 tests, offline
-
-# optional: also run the 21 browser tests (they skip themselves without these)
-pip install -r requirements-dev.txt && playwright install chromium
+.venv/bin/python -m unittest discover -s tests    # 270 tests, offline, no credentials
 ```
 
-## More
+The 21 browser tests in `tests/test_ui_e2e.py` skip themselves unless Playwright
+and a browser are installed — see [Testing](docs/testing.md).
 
-- **[USAGE.md](USAGE.md)** — full UI walkthrough, data-source details, the list
-  of shipped bug classes, and coverage notes.
-- **[SECURITY.md](SECURITY.md)** — how to report vulnerabilities, threat model,
-  and how to run this with credentials without exposing the port.
-- Extend or tune bug classes in
-  [`modules/cwe_categories.py`](modules/cwe_categories.py).
+## Status and limits
+
+This is a research tool for a single operator on `localhost`. It binds loopback
+by default and refuses to serve credentials on a public interface without an
+explicit token — read [SECURITY.md](SECURITY.md) before exposing it.
+
+Known limits are documented rather than hidden: CWE tagging is imperfect
+(umbrella CWEs like `CWE-284` sweep in unrelated bugs, which is what the AI pass
+is for), OSV's CWE-tagged records largely mirror GHSA, and sort order interacts
+with per-source truncation. See
+[Data sources](docs/data-sources.md#honest-coverage-notes) and
+[Architecture](docs/architecture.md#known-limits).
