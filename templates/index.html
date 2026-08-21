@@ -61,21 +61,68 @@
         <div class="rail-stats" aria-label="Available search dimensions">
           <span><b>4</b> sources</span>
           <span><b>{{ categories|length }}</b> classes</span>
-          <span><b>{{ cached_count }}</b> cached</span>
+          <span><b>{{ cwe_count }}</b> CWEs</span>
         </div>
       </div>
 
-      <section class="control-section" aria-labelledby="preset-heading">
+      <section class="control-section history-section" id="history-section" aria-labelledby="history-heading" hidden>
         <div class="section-heading">
-          <h3 id="preset-heading">Preset</h3>
-          <span class="section-note">Fast start</span>
+          <h3 id="history-heading">Recent searches</h3>
+          <button class="section-action" id="history-clear" type="button" title="Forget all recent searches">Clear</button>
         </div>
         <div class="field field-last">
-          <label for="scenario">Scenario <span class="hint">fills the form</span></label>
-          <select id="scenario">
-            <option value="">— pick a preset —</option>
-            {% for s in scenarios %}<option value="{{ s.key }}">{{ s.label }}</option>{% endfor %}
-          </select>
+          <ul class="history-list" id="history-list" aria-labelledby="history-heading"></ul>
+        </div>
+      </section>
+
+      <section class="control-section" aria-labelledby="classes-heading">
+        <div class="section-heading">
+          <h3 id="classes-heading">Bug class</h3>
+          <span class="section-note">CWE {{ cwe_version }}</span>
+        </div>
+
+        <div class="field cwe-finder">
+          <label for="cwe-search">Find a bug <span class="hint">name, alias or CWE ID</span></label>
+          <div class="combo-input">
+            <span class="combo-icon" aria-hidden="true"></span>
+            <input id="cwe-search" type="text" role="combobox" autocomplete="off" spellcheck="false"
+                   placeholder="639 · IDOR · sql injection"
+                   aria-expanded="false" aria-controls="cwe-options" aria-autocomplete="list"
+                   aria-describedby="cwe-search-help">
+            <button class="combo-clear" id="cwe-clear" type="button" hidden aria-label="Clear search">×</button>
+          </div>
+          <ul class="combo-list" id="cwe-options" role="listbox"
+              aria-label="Matching bug classes and CWEs" hidden></ul>
+          <p class="hint combo-help" id="cwe-search-help">
+            Search all {{ cwe_count }} CWEs by code or name. ↑↓ to move, Enter to add.
+          </p>
+        </div>
+
+        <div class="field">
+          <span class="field-label" id="selection-label">
+            Query targets <span class="hint" id="selection-count"></span>
+          </span>
+          <div class="chips" id="selected-chips" role="list" aria-labelledby="selection-label"></div>
+          <p class="sr-only" id="selection-live" role="status" aria-live="polite"></p>
+        </div>
+
+        <fieldset class="field">
+          <legend class="sr-only">Choose vulnerability classes</legend>
+          <div class="cats taxonomy-list">
+            {% for c in categories %}
+            <label class="cat taxonomy-item">
+              <input type="checkbox" name="category" value="{{ c.key }}" {{ 'checked' if c.key == 'bac' else '' }}>
+              <span class="cat-copy"><span class="c-label">{{ c.label }}</span><span class="c-desc">{{ c.description }}</span></span>
+            </label>
+            {% endfor %}
+          </div>
+        </fieldset>
+
+        <div class="field field-last compact-field">
+          <label class="check switch-check">
+            <input type="checkbox" id="include_extended" checked>
+            <span><span class="check-title">Include extended CWEs</span><span class="hint">Higher recall, more noise</span></span>
+          </label>
         </div>
       </section>
 
@@ -110,48 +157,6 @@
             <span><span class="check-title">Force-refresh OSV cache</span><span class="hint">~10 MB per ecosystem</span></span>
           </label>
         </fieldset>
-      </section>
-
-      <section class="control-section" aria-labelledby="classes-heading">
-        <div class="section-heading">
-          <h3 id="classes-heading">Bug class</h3>
-          <span class="section-note">CWE map</span>
-        </div>
-        <fieldset class="field">
-          <legend class="sr-only">Choose vulnerability classes</legend>
-          <div class="cats taxonomy-list">
-            {% for c in categories %}
-            <label class="cat taxonomy-item">
-              <input type="checkbox" name="category" value="{{ c.key }}" {{ 'checked' if c.key == 'bac' else '' }}>
-              <span class="cat-copy"><span class="c-label">{{ c.label }}</span><span class="c-desc">{{ c.description }}</span></span>
-            </label>
-            {% endfor %}
-          </div>
-        </fieldset>
-
-        <div class="field compact-field">
-          <label class="check switch-check">
-            <input type="checkbox" id="include_extended" checked>
-            <span><span class="check-title">Include extended CWEs</span><span class="hint">Higher recall, more noise</span></span>
-          </label>
-        </div>
-
-        <div class="field field-last">
-          <span class="field-label" id="extra-cwes-label">Extra CWEs <span class="hint">optional</span></span>
-          <details class="cwe-catalog">
-            <summary aria-labelledby="extra-cwes-label extra_cwes_count">
-              <span><b id="extra_cwes_count">none</b> selected</span><span class="details-action">Choose</span>
-            </summary>
-            <div class="cats cwe-list">
-              {% for c in cwe_catalog %}
-              <label class="cat cwe-item">
-                <input type="checkbox" name="extra_cwe" value="{{ c.id }}">
-                <span class="cat-copy"><span class="c-label">CWE-{{ c.id }}</span><span class="c-desc">{{ c.label }}</span></span>
-              </label>
-              {% endfor %}
-            </div>
-          </details>
-        </div>
       </section>
 
       <section class="control-section" aria-labelledby="scope-heading">
@@ -299,7 +304,7 @@
           <div class="empty-copy">
             <span class="eyebrow">No query yet</span>
             <h3>Search by how the bug works, not by the title.</h3>
-            <p>Pick a preset or set a class and ecosystem. VulnSight merges sources, then you can score the queue with AI.</p>
+            <p>Type a CWE ID or a bug name — “639”, “IDOR”, “SQL injection” — or tick a class. VulnSight merges sources, then you can score the queue with AI.</p>
             <ol class="workflow" aria-label="Analysis workflow">
               <li><span>1</span><b>Search</b><small>Collect by CWE</small></li>
               <li><span>2</span><b>Refine</b><small>Score with AI</small></li>
@@ -342,7 +347,7 @@
   <script nonce="{{ csp_nonce }}">
     window.BOOT = {
       POPULAR: {{ popular_packages|tojson }},
-      SCENARIOS: {{ scenarios|tojson }},
+      CLASSES: {{ categories|tojson }},
       OSV_SUPPORTED: {{ osv_supported|tojson }},
       AI_CONFIGURED: {{ ai_configured|tojson }},
       AUTH_REQUIRED: {{ auth_required|tojson }},

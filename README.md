@@ -29,6 +29,12 @@ pass** is for: it reads each advisory and returns a structured verdict
 
 - **Bug-class → CWE filtering** across GHSA + NVD + OSV.dev, merged through
   the full CVE/GHSA/OSV alias graph without discarding source metadata.
+- **Search the whole CWE catalog** — type a code (`639`), an official MITRE name
+  ("prototype pollution") or a community alias (`IDOR`, `BOLA`, `SSRF`, `XXE`)
+  and pick from all 944 weaknesses of CWE 4.20. Any single CWE becomes an ad-hoc
+  bug class that is both filtered on and AI-scored. The catalog is searched in
+  the browser, so results appear as you type.
+- **Recent searches** — the last 12 queries are restored with one click.
 - **Scope by** ecosystem (Maven/Go/npm/pip/…), package, severity, publish date.
 - **AI refinement** — confirm true matches across every selected bug class and surface source-native records
   (`GO-`, `RUSTSEC-`, `PYSEC-`) that carry no CWE tag at all.
@@ -37,7 +43,7 @@ pass** is for: it reads each advisory and returns a structured verdict
 - **SQLite cache** — advisories and AI verdicts persist, so repeat searches are
   fast and never re-spend AI tokens on an advisory already classified.
 - **Export** the filtered list as CSV or JSON.
-- **Offline test suite** — 120+ unit tests, no network or credentials required.
+- **Offline test suite** — 220+ unit tests, no network or credentials required.
 
 ## Quick start
 
@@ -96,6 +102,7 @@ modules/      core logic: search orchestration, GHSA/OSV clients, CWE map,
               CVSS scoring, SQLite cache, AI classifier
 static/       style.css + app.js
 templates/    index.html (page shell)
+tools/        generate_cwe_catalog.py — refresh the MITRE CWE table
 tests/        per-module offline unit tests
 ```
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 import copy
 import json
 import logging
-import re
 from dataclasses import dataclass
 
 from . import ai_classifier
@@ -14,7 +13,15 @@ from . import epss_client
 from . import ghsa_client as ghsa
 from . import nvd_client
 from . import osv_client
-from .cwe_categories import CATEGORIES, ECOSYSTEMS, SEVERITIES, cwe_label, normalize_cwe_id, resolve_cwes
+from .cwe_categories import (
+    ECOSYSTEMS,
+    SEVERITIES,
+    canonical_category,
+    cwe_label,
+    is_known_category,
+    normalize_cwe_id,
+    resolve_cwes,
+)
 from .query_filters import matches_common_filters, valid_published_filter
 
 logger = logging.getLogger(__name__)
@@ -31,9 +38,6 @@ _SORT_FIELD = {
     "epss_percentile": "epss_percentile",
 }
 MAX_CATEGORY_INPUTS = 100
-MAX_EXTRA_CWES = 100
-MAX_CWE_ID_DIGITS = 7
-_EXTRA_CWE_RE = re.compile(rf"(?:CWE-)?([0-9]{{1,{MAX_CWE_ID_DIGITS}}})", re.IGNORECASE)
 
 
 class SearchError(RuntimeError):
@@ -140,46 +144,6 @@ def parse_text(value, default: str, field_name: str) -> str:
     return value.strip() or default
 
 
-def _parse_extra_cwes(value) -> list[str]:
-    """Parse a bounded list of canonical positive CWE identifiers."""
-    if value is None or value == "":
-        return []
-    if isinstance(value, str):
-        raw_values = [part.strip() for part in value.split(",") if part.strip()]
-    elif isinstance(value, list):
-        if len(value) > MAX_EXTRA_CWES:
-            raise SearchError(
-                f"Too many extra CWEs; maximum is {MAX_EXTRA_CWES}.", 400
-            )
-        raw_values = []
-        for item in value:
-            if isinstance(item, bool) or not isinstance(item, (str, int)):
-                raise SearchError("extra_cwes entries must be strings or integers.", 400)
-            text = str(item).strip()
-            if text:
-                raw_values.append(text)
-    else:
-        raise SearchError("extra_cwes must be a list or comma-separated string.", 400)
-
-    if len(raw_values) > MAX_EXTRA_CWES:
-        raise SearchError(
-            f"Too many extra CWEs; maximum is {MAX_EXTRA_CWES}.", 400
-        )
-
-    out: list[str] = []
-    seen: set[str] = set()
-    for raw in raw_values:
-        match = _EXTRA_CWE_RE.fullmatch(raw)
-        if not match or int(match.group(1)) == 0:
-            display = raw if len(raw) <= 32 else raw[:29] + "..."
-            raise SearchError(f"Invalid CWE identifier: {display}", 400)
-        cwe = str(int(match.group(1)))
-        if cwe not in seen:
-            seen.add(cwe)
-            out.append(cwe)
-    return out
-
-
 def parse_search_query(body: dict) -> SearchQuery:
     """Validate a raw /api/search JSON body into a SearchQuery."""
     category_inputs = parse_str_list(
@@ -189,8 +153,8 @@ def parse_search_query(body: dict) -> SearchQuery:
         max_item_length=64,
     )
     if not category_inputs:
-        raise SearchError("Select at least one vulnerability category.", 400)
-    categories = list(dict.fromkeys(category_inputs))
+        raise SearchError("Select at least one bug class or CWE.", 400)
+    categories = list(dict.fromkeys(canonical_category(c) for c in category_inputs))
     include_extended = parse_bool(body.get("include_extended"), True)
     ecosystem = parse_text(body.get("ecosystem"), "any", "ecosystem")
     affects = parse_text(body.get("affects"), "", "affects") or None
@@ -208,17 +172,15 @@ def parse_search_query(body: dict) -> SearchQuery:
     except (TypeError, ValueError):
         max_results = 100
 
-    unknown_categories = [category for category in categories if category not in CATEGORIES]
+    # A category is either a curated bug class ("bac") or a single CWE picked
+    # from the full MITRE catalog ("cwe:1321").
+    unknown_categories = [
+        category for category in categories if not is_known_category(category)
+    ]
     if unknown_categories:
         raise SearchError(f"Unsupported categories: {', '.join(unknown_categories)}", 400)
 
     cwes = resolve_cwes(categories, include_extended)
-    seen_cwes = set(cwes)
-    for cwe in _parse_extra_cwes(body.get("extra_cwes")):
-        if cwe not in seen_cwes:
-            seen_cwes.add(cwe)
-            cwes.append(cwe)
-
     if not cwes:
         raise SearchError("No CWEs resolved from the selected categories.", 400)
 
@@ -433,6 +395,9 @@ def run_search(q: SearchQuery) -> SearchOutcome:
     warnings: list[str] = []
     per_source: dict[str, int] = {}
     collected: list[dict] = []
+    # 'osv' and 'osv-native' read the same bulk export. Honour the refresh
+    # request once so selecting both does not download and re-parse ~10 MB twice.
+    osv_refresh_pending = q.refresh_osv
 
     # --- GHSA (server-side CWE filter) ---
     if "ghsa" in q.sources:
@@ -461,10 +426,11 @@ def run_search(q: SearchQuery) -> SearchOutcome:
                 f"'{q.ecosystem}' skipped. Supported: {', '.join(osv_client.ECOSYSTEM_MAP)}."
             )
         else:
+            refresh, osv_refresh_pending = osv_refresh_pending, False
             try:
                 o = osv_client.fetch_osv(q.ecosystem, q.cwes, affects=q.affects,
                                          severity=q.severity, max_results=q.max_results,
-                                         force_refresh=q.refresh_osv,
+                                         force_refresh=refresh,
                                          published=q.published)
                 collected += o
                 per_source["osv"] = len(o)
@@ -499,10 +465,11 @@ def run_search(q: SearchQuery) -> SearchOutcome:
                 f"'{q.ecosystem}' skipped."
             )
         else:
+            refresh, osv_refresh_pending = osv_refresh_pending, False
             try:
                 on = osv_client.fetch_osv_native(q.ecosystem, q.categories,
                                                  max_results=q.max_results,
-                                                 force_refresh=q.refresh_osv,
+                                                 force_refresh=refresh,
                                                  affects=q.affects,
                                                  severity=q.severity,
                                                  published=q.published)
@@ -528,17 +495,6 @@ def run_search(q: SearchQuery) -> SearchOutcome:
         )
     ]
 
-    # Enrich with EPSS scores before sorting so epss_percentage / epss_percentile
-    # sort modes work correctly.
-    cve_ids = [r["cve_id"] for r in results if r.get("cve_id")]
-    if cve_ids:
-        epss_scores = epss_client.fetch_epss(cve_ids)
-        for rec in results:
-            score = epss_scores.get(rec.get("cve_id", ""))
-            if score:
-                rec["epss_percentage"] = score["epss"]
-                rec["epss_percentile"] = score["percentile"]
-
     # Sort by the requested field. Numeric EPSS fields cannot fall back to ""
     # — mixed float/str keys raise TypeError on Python 3.
     field = _SORT_FIELD[q.sort]
@@ -553,8 +509,28 @@ def run_search(q: SearchQuery) -> SearchOutcome:
                 return 0.0
         return value or ""
 
-    results.sort(key=_sort_key, reverse=(q.direction != "asc"))
-    results = results[:q.max_results]
+    def _enrich_epss(records: list[dict]) -> None:
+        cve_ids = [r["cve_id"] for r in records if r.get("cve_id")]
+        if not cve_ids:
+            return
+        epss_scores = epss_client.fetch_epss(cve_ids)
+        for rec in records:
+            score = epss_scores.get(rec.get("cve_id", ""))
+            if score:
+                rec["epss_percentage"] = score["epss"]
+                rec["epss_percentile"] = score["percentile"]
+
+    # Sorting by EPSS needs every candidate scored first; every other sort mode
+    # can truncate first, which keeps EPSS to one batched request instead of one
+    # per 100 merged records (up to 4x max_results before truncation).
+    if numeric:
+        _enrich_epss(results)
+        results.sort(key=_sort_key, reverse=(q.direction != "asc"))
+        results = results[:q.max_results]
+    else:
+        results.sort(key=_sort_key, reverse=(q.direction != "asc"))
+        results = results[:q.max_results]
+        _enrich_epss(results)
 
     cache.upsert_advisories(results)
 
@@ -566,7 +542,7 @@ def run_search(q: SearchQuery) -> SearchOutcome:
     # Partial cache hits are completed by /api/ai/classify, never presented as a
     # finished multi-category decision.
     cfg = ai_classifier.load_config()
-    ai_categories = [category for category in q.categories if category in CATEGORIES]
+    ai_categories = [category for category in q.categories if is_known_category(category)]
     if cfg.configured and ai_categories:
         cached_by_category: dict[str, dict[str, dict]] = {}
         for category in ai_categories:

@@ -111,7 +111,7 @@ class TestFlaskApp(unittest.TestCase):
     def test_search_no_category_returns_400(self):
         r = self.client.post("/api/search", json={})
         self.assertEqual(r.status_code, 400)
-        self.assertIn("category", r.get_json()["error"].lower())
+        self.assertIn("bug class", r.get_json()["error"].lower())
 
     def test_search_ghsa_error_502(self):
         with mock.patch("modules.ghsa_client.fetch_advisories", side_effect=ghsa.GhCliError("nope")):
@@ -336,9 +336,12 @@ class TestFlaskApp(unittest.TestCase):
             html = self.client.get("/").get_data(as_text=True)
 
         required_ids = [
-            "scenario", "refresh_osv", "include_extended", "ecosystem",
+            "refresh_osv", "include_extended", "ecosystem",
             "severity", "affects_pick", "published", "max_results", "sort",
-            "direction", "type", "extra_cwes_count", "auto-btn", "search-btn",
+            "direction", "type", "auto-btn", "search-btn",
+            "cwe-search", "cwe-clear", "cwe-options", "selected-chips",
+            "selection-count", "selection-live",
+            "history-section", "history-list", "history-clear",
             "summary", "ai-btn", "retry-btn", "only_match", "export-btn",
             "results", "ai-test-pill", "filters-toggle", "filters-close",
             "filter-scrim",
@@ -347,8 +350,11 @@ class TestFlaskApp(unittest.TestCase):
         for element_id in required_ids:
             self.assertEqual(html.count(f'id="{element_id}"'), 1, element_id)
 
-        for name in ("category", "source", "extra_cwe"):
+        for name in ("category", "source"):
             self.assertIn(f'name="{name}"', html)
+        # The CWE catalog is fetched from /api/cwes, never inlined in the page.
+        self.assertNotIn("cwe_catalog", html)
+        self.assertLess(len(html), 60000, "index page should stay lean")
         for export_format in ("csv", "json", "csv-matches"):
             self.assertIn(f'data-fmt="{export_format}"', html)
         self.assertLess(html.index("window.BOOT"), html.index("app.js"))
@@ -373,6 +379,48 @@ class TestFlaskApp(unittest.TestCase):
         data = r.get_json()
         self.assertIn("supported", data)
         self.assertIn("cached", data)
+
+    def test_cwe_catalog_endpoint(self):
+        r = self.client.get("/api/cwes")
+        self.assertEqual(r.status_code, 200)
+        data = r.get_json()
+        self.assertEqual(data["columns"], ["id", "label", "aliases", "level"])
+        self.assertGreater(len(data["rows"]), 900)
+        by_id = {row[0]: row for row in data["rows"]}
+        # Full name and code for every entry — that is the point of the picker.
+        self.assertEqual(by_id["639"][1], "Authorization Bypass Through User-Controlled Key")
+        self.assertIn("IDOR", by_id["639"][2].split("|"))
+        self.assertEqual(by_id["639"][3], "Base")
+
+    def test_cwe_catalog_is_cacheable(self):
+        """The browser must reuse the catalog instead of refetching 60+ KB."""
+        first = self.client.get("/api/cwes")
+        etag = first.headers["ETag"]
+        self.assertIn("max-age=", first.headers["Cache-Control"])
+        again = self.client.get("/api/cwes", headers={"If-None-Match": etag})
+        self.assertEqual(again.status_code, 304)
+        self.assertEqual(again.get_data(), b"")
+
+    def test_classify_accepts_single_cwe_pseudo_category(self):
+        cfg = ai_classifier.AIConfig("anthropic", "https://x", ["tok"], "PRO")
+        with mock.patch("modules.ai_classifier.load_config", return_value=cfg), \
+                mock.patch("modules.cache.get_advisory", return_value=None):
+            r = self.client.post(
+                "/api/ai/classify",
+                json={"categories": ["cwe:1321", "bac"], "advisory_ids": ["GHSA-x"]},
+            )
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertEqual(body["categories"], ["cwe:1321", "bac"])
+        self.assertEqual(body["missing"], ["GHSA-x"])
+
+    def test_classify_rejects_malformed_cwe_pseudo_category(self):
+        r = self.client.post(
+            "/api/ai/classify",
+            json={"categories": ["cwe:0"], "advisory_ids": ["GHSA-x"]},
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("Unsupported categories", r.get_json()["error"])
 
     def test_csrf_blocks_foreign_origin(self):
         r = self.client.post(

@@ -9,6 +9,7 @@ Environment: reads .env in this folder (see .env.example) for the AI provider.
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import secrets
@@ -20,17 +21,25 @@ from modules import ai_classifier, cache, config, osv_client, search_service, se
 from modules import ghsa_client as ghsa
 from modules.cwe_categories import (
     CATEGORIES,
+    CWE_VERSION,
     ECOSYSTEMS,
     POPULAR_PACKAGES,
-    SCENARIOS,
     SEVERITIES,
-    all_cwes,
+    canonical_category,
+    is_known_category,
+    picker_catalog,
 )
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 MAX_AI_BATCH = 100
+
+
+@functools.lru_cache(maxsize=1)
+def _cwe_payload() -> dict:
+    """The CWE picker catalog, serialized shape built once per process."""
+    return picker_catalog()
 
 
 def _json_object() -> tuple[dict | None, tuple | None]:
@@ -168,9 +177,14 @@ def create_app():
         categories = [
             {
                 "key": k,
+                "code": v["code"],
                 "label": v["label"],
                 "description": v["description"],
-                "cwe_count": len(v["core"]) + len(v["extended"]),
+                # The CWE finder needs these to flag which CWEs a class already
+                # covers, so picking one is an informed choice rather than a
+                # redundant extra AI pass, and to size the NVD cost estimate.
+                "core": list(dict.fromkeys(v["core"])),
+                "extended": [c for c in dict.fromkeys(v["extended"]) if c not in v["core"]],
             }
             for k, v in CATEGORIES.items()
         ]
@@ -180,9 +194,9 @@ def create_app():
             categories=categories,
             ecosystems=ECOSYSTEMS,
             severities=SEVERITIES,
-            cwe_catalog=all_cwes(),
+            cwe_version=CWE_VERSION,
+            cwe_count=len(_cwe_payload()["rows"]),
             popular_packages=POPULAR_PACKAGES,
-            scenarios=SCENARIOS,
             osv_supported=list(osv_client.ECOSYSTEM_MAP.keys()),
             ai_configured=ai_cfg.configured,
             gh_ok=ghsa.gh_auth_ok(),
@@ -201,6 +215,7 @@ def create_app():
             {
                 "categories": {
                     k: {
+                        "code": v["code"],
                         "label": v["label"],
                         "description": v["description"],
                         "core": v["core"],
@@ -214,6 +229,24 @@ def create_app():
                 "ai_configured": ai_classifier.load_config().configured,
             }
         )
+
+    @app.route("/api/cwes")
+    def api_cwes():
+        """Full MITRE CWE catalog powering the UI's CWE/bug-name search box.
+
+        The whole table is sent once so the search itself never needs a round
+        trip. It only changes when MITRE ships a release and the generated
+        module is refreshed, so it is served with a version ETag the browser can
+        revalidate cheaply.
+        """
+        payload = _cwe_payload()
+        etag = f'W/"cwe-{payload["version"]}"'
+        if request.headers.get("If-None-Match") == etag:
+            return "", 304
+        response = jsonify(payload)
+        response.headers["ETag"] = etag
+        response.headers["Cache-Control"] = "private, max-age=86400"
+        return response
 
     @app.route("/api/ai/test", methods=["POST"])
     def api_ai_test():
@@ -269,14 +302,16 @@ def create_app():
             categories = search_service.parse_str_list(
                 body.get("categories"),
                 field_name="categories",
-                max_items=len(CATEGORIES),
+                max_items=search_service.MAX_CATEGORY_INPUTS,
                 max_item_length=64,
             )
             if not categories:
                 categories = [search_service.parse_text(
                     body.get("category"), "bac", "category"
                 )]
-            categories = list(dict.fromkeys(categories))
+            # Fold 'CWE:639' / 'cwe:639' into one key so the verdict cache and
+            # the search path agree on the category name.
+            categories = list(dict.fromkeys(canonical_category(c) for c in categories))
             advisory_ids = list(dict.fromkeys(search_service.parse_str_list(
                 body.get("advisory_ids") or body.get("ghsa_ids"),
                 field_name="advisory IDs",
@@ -287,7 +322,9 @@ def create_app():
         except search_service.SearchError as exc:
             return jsonify({"error": exc.public_message}), exc.status
 
-        invalid_categories = [category for category in categories if category not in CATEGORIES]
+        invalid_categories = [
+            category for category in categories if not is_known_category(category)
+        ]
         if invalid_categories:
             return jsonify({"error": f"Unsupported categories: {', '.join(invalid_categories)}"}), 400
 

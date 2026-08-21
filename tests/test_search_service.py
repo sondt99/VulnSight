@@ -37,7 +37,9 @@ class TestParseSearchQuery(unittest.TestCase):
         with self.assertRaises(search_service.SearchError) as cm:
             search_service.parse_search_query({})
         self.assertEqual(cm.exception.status, 400)
-        self.assertIn("category", str(cm.exception).lower())
+        message = str(cm.exception).lower()
+        self.assertIn("bug class", message)
+        self.assertIn("cwe", message)
         self.assertEqual(cm.exception.public_message, str(cm.exception))
         self.assertNotIn("Traceback", cm.exception.public_message)
 
@@ -66,43 +68,66 @@ class TestParseSearchQuery(unittest.TestCase):
                 q = search_service.parse_search_query({"categories": ["bac"], "max_results": raw})
                 self.assertEqual(q.max_results, want)
 
-    def test_extra_cwes_merged_without_duplicates(self):
+    def test_single_cwe_pseudo_category_resolves_alone(self):
+        """A CWE picked from the catalog is a valid query with no bug class."""
+        q = search_service.parse_search_query({"categories": ["cwe:1321"]})
+        self.assertEqual(q.cwes, ["1321"])
+        self.assertEqual(q.categories, ["cwe:1321"])
+
+    def test_cwe_pseudo_categories_merge_without_duplicates(self):
         q = search_service.parse_search_query(
-            {"categories": ["xss"], "extra_cwes": "CWE-79, 639"})
+            {"categories": ["xss", "cwe:79", "cwe:639"]})
         self.assertEqual(q.cwes.count("79"), 1)   # already in xss core, not duped
         self.assertIn("639", q.cwes)              # genuinely new -> appended
         self.assertNotIn("89", q.cwes)            # sqli not requested
 
-    def test_unknown_category_is_400_even_with_extra_cwes(self):
+    def test_cwe_pseudo_categories_keep_selection_order(self):
+        q = search_service.parse_search_query(
+            {"categories": ["sqli", "cwe:79", "cwe:639"], "include_extended": False}
+        )
+        self.assertEqual(q.cwes, ["89", "79", "639"])
+
+    def test_empty_selection_is_rejected(self):
+        with self.assertRaises(search_service.SearchError) as cm:
+            search_service.parse_search_query({"categories": []})
+        self.assertEqual(cm.exception.status, 400)
+
+    def test_unknown_category_is_400(self):
         for body in (
             {"categories": ["nope"]},
-            {"categories": ["nope"], "extra_cwes": "CWE-79"},
+            {"categories": ["nope"], "sources": ["ghsa"]},
+            {"categories": ["bac", "nope"]},
         ):
             with self.subTest(body=body), self.assertRaises(search_service.SearchError) as cm:
                 search_service.parse_search_query(body)
             self.assertEqual(cm.exception.status, 400)
 
-    def test_extra_cwes_are_bounded_and_strictly_typed(self):
-        invalid_values = (
-            ["9" * (search_service.MAX_CWE_ID_DIGITS + 1)],
-            ["CWE-0"],
-            [{"id": "79"}],
-            list(range(1, search_service.MAX_EXTRA_CWES + 2)),
+    def test_malformed_cwe_keys_are_rejected(self):
+        malformed = (
+            "cwe:",                 # no id
+            "cwe:0",                # CWE ids are positive
+            "cwe:012",              # no leading zeros; '12' is canonical
+            "cwe:12345678",         # beyond MAX_CWE_ID_DIGITS
+            "cwe:79a",              # not numeric
+            "cwe-79",               # wrong separator
+            "CWE:79 ; DROP TABLE",  # junk
         )
-        for extra_cwes in invalid_values:
-            with self.subTest(extra_cwes=type(extra_cwes[0]).__name__), \
-                    self.assertRaises(search_service.SearchError):
-                search_service.parse_search_query({"categories": ["bac"], "extra_cwes": extra_cwes})
+        for category in malformed:
+            with self.subTest(category=category), \
+                    self.assertRaises(search_service.SearchError) as cm:
+                search_service.parse_search_query({"categories": [category]})
+            self.assertEqual(cm.exception.status, 400)
 
-    def test_extra_cwes_are_canonicalized_and_deduplicated(self):
+    def test_cwe_keys_are_case_insensitive(self):
+        q = search_service.parse_search_query({"categories": ["CWE:639"]})
+        self.assertEqual(q.cwes, ["639"])
+
+    def test_equivalent_cwe_key_spellings_collapse_to_one_category(self):
+        """Two spellings would otherwise mean two AI passes and two cache keys."""
         q = search_service.parse_search_query(
-            {
-                "categories": ["sqli"],
-                "include_extended": False,
-                "extra_cwes": ["CWE-00079", 79, "639"],
-            }
-        )
-        self.assertEqual(q.cwes, ["89", "79", "639"])
+            {"categories": ["CWE:639", "cwe:639", "bac"]})
+        self.assertEqual(q.categories, ["cwe:639", "bac"])
+        self.assertEqual(q.cwes.count("639"), 1)
 
     def test_string_list_fields_are_bounded_and_strictly_typed(self):
         invalid_bodies = (
@@ -132,8 +157,6 @@ class TestParseSearchQuery(unittest.TestCase):
             search_service.parse_search_query({"categories": ["bac"], "published": "2026-02-30"})
         with self.assertRaises(search_service.SearchError):
             search_service.parse_search_query({"categories": ["bac"], "ecosystem": {"unexpected": True}})
-        with self.assertRaises(search_service.SearchError):
-            search_service.parse_search_query({"categories": ["bac"], "extra_cwes": ["CWE-not-a-number"]})
 
 
 class TestMergeAdvisories(unittest.TestCase):

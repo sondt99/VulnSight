@@ -31,20 +31,37 @@ Requirements:
 
 ## How to use the UI
 
-1. **Pick bug classes** on the left (BAC preselected). Each maps to a CWE set.
-2. **Include extended CWEs** — on = higher recall (more results, more noise),
-   off = only high-precision core CWEs.
-3. Set **ecosystem** (`maven` = Java, `go` = Golang), optional **package**,
+1. **Find a bug** — type into the search box at the top of the left rail. It
+   matches the **whole MITRE CWE catalog** (944 weaknesses, CWE 4.20) plus the
+   curated bug classes, by:
+   - **code** — `639`, `CWE-639`, or a prefix like `13` ;
+   - **official MITRE name** — "authorization bypass", "prototype pollution" ;
+   - **community alias** — `IDOR`, `BOLA`, `BFLA`, `SSRF`, `XXE`, `SSTI`, `SQLi`.
+
+   `↑`/`↓` to move, `Enter` to add. Picking a **class** ticks its checkbox;
+   picking a **CWE** adds a chip. Both appear under **Query targets**. Search is
+   local (the catalog is fetched once and cached), so it never round-trips.
+2. **Pick bug classes** in the list below (BAC preselected). Each maps to a CWE
+   set. A single CWE you pick becomes its own ad-hoc class: it is filtered on
+   *and* scored by the AI pass, using that CWE's real MITRE definition.
+3. **Include extended CWEs** — on = higher recall (more results, more noise),
+   off = only high-precision core CWEs. Only affects curated classes; a CWE you
+   picked yourself is always used exactly as-is.
+4. Set **ecosystem** (`maven` = Java, `go` = Golang), optional **package**,
    **severity**, **published** filter (e.g. `>=2024-01-01`), and **max results**.
-4. Click **Search** → advisories load, sorted by severity then date.
-5. Click **✨ Refine with AI** → each advisory is sent to the LLM which returns
+5. Click **Search** → advisories load, sorted by severity then date. The query
+   lands in **Recent searches** at the top of the rail; click one to restore
+   every filter and re-run it, `×` to forget it. History is kept in
+   `localStorage` (last 12, deduplicated), so it survives a reload but never
+   leaves the browser.
+6. Click **✨ Refine with AI** → each advisory is sent to the LLM which returns
    `is_match / confidence / vuln_type / reason`. Toggle **Only AI matches** to
    hide the false positives. Verdicts are cached in SQLite so re-runs are free.
    **Do not skip this for BAC:** umbrella CWEs like `CWE-284` also tag SSRF,
    ReDoS, crypto bugs, and header issues. A live pass of 272 newest BAC-tagged
    advisories dropped 25 that were not access control.
-6. **⚡ Test AI** pill (top-right) checks the endpoint is reachable.
-7. **⬇ Export** the current (filtered) list as **CSV**, **JSON**, or **CSV — AI
+7. **⚡ Test AI** pill (top-right) checks the endpoint is reachable.
+8. **⬇ Export** the current (filtered) list as **CSV**, **JSON**, or **CSV — AI
    matches only**. CSV is Excel-friendly (UTF-8 BOM, RFC-4180 quoting) and
    includes the AI verdict columns.
 
@@ -108,6 +125,21 @@ BAC/injection.
 
 Add or tune classes in [`modules/cwe_categories.py`](modules/cwe_categories.py).
 
+Anything outside this table is still reachable: pass a **single CWE as its own
+class** with the `cwe:<id>` key. It is filtered on server-side and scored by the
+AI pass against that CWE's real MITRE name and aliases.
+
+```jsonc
+// POST /api/search
+{"categories": ["bac", "cwe:1321"], "ecosystem": "npm"}
+```
+
+The catalog behind the picker is generated from MITRE's official XML:
+
+```bash
+python tools/generate_cwe_catalog.py     # refreshes modules/cwe_catalog.py
+```
+
 ## CLI / programmatic use
 
 Everything is importable without Flask:
@@ -118,6 +150,9 @@ from modules.cwe_categories import resolve_cwes
 
 p = g.SearchParams(ecosystem="go", cwes=resolve_cwes(["bac"]), max_results=50)
 advs = [g.normalize(a) for a in g.fetch_advisories(p)]
+
+# A single CWE works as an ad-hoc class, with no curated entry needed:
+resolve_cwes(["cwe:1321"])          # -> ['1321']
 ```
 
 ## Architecture
@@ -128,7 +163,8 @@ modules/
   config.py           minimal .env loader; BASE_DIR = project root
   search_service.py   search orchestration: parse → fetch sources → merge/dedupe
                       → sort → enrich (usable without Flask)
-  cwe_categories.py   bug-class → CWE mapping + labels (+ normalize_cwe_id)
+  cwe_categories.py   bug-class → CWE mapping, labels, cwe:<id> ad-hoc classes
+  cwe_catalog.py      GENERATED: full MITRE CWE names + aliases (see tools/)
   ghsa_client.py      gh api /advisories wrapper, cursor pagination, normalize()
   osv_client.py       OSV.dev bulk export: download, normalize, CWE/keyword filter
   cvss.py             CVSS v3.0/3.1 base score from vector (spec-exact rounding)
@@ -147,6 +183,11 @@ cd VulnSight
 .venv/bin/python -m unittest discover -s tests -v   # full suite, offline
 .venv/bin/python tests/test_app.py                  # or any single file
 ```
+
+The frontend helpers lifted out of `static/app.js` (CSV escaping, CWE-finder
+ranking, history sanitisation) are tested in `tests/test_frontend_*.js` and run
+inside the Python suite via `tests/test_frontend_js.py` — skipped automatically
+when `node` is unavailable.
 
 ## Notes & limits
 

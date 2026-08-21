@@ -1,5 +1,5 @@
 // === Configuration & State ===
-const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window.BOOT;
+const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window.BOOT;
     const $ = (s) => document.querySelector(s);
     const $$ = (s) => Array.from(document.querySelectorAll(s));
     let LAST = [];           // last result set (normalized advisories)
@@ -25,8 +25,10 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = wind
     }
 
 
+    // Query targets are curated classes plus any single CWEs picked from the
+    // catalog ("cwe:639"); the backend treats both the same way.
     function selectedCategories() {
-      return $$('input[name=category]:checked').map(c => c.value);
+      return $$('input[name=category]:checked').map(c => c.value).concat(selectedCweKeys());
     }
 
     // === Package Suggestions ===
@@ -41,32 +43,458 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = wind
     }
 
     // === Search & Filters ===
-    function publishedFilter() {
-      const v = $('#published').value;
-      if (!v || v === 'any') return '';
-      if (v === '2020') return '>=2020-01-01';
-      const days = {'7d':7,'30d':30,'90d':90,'180d':180,'1y':365,'2y':730}[v];
+    function publishedWindow(value) {
+      if (!value || value === 'any') return '';
+      if (value === '2020') return '>=2020-01-01';
+      const days = {'7d':7,'30d':30,'90d':90,'180d':180,'1y':365,'2y':730}[value];
       if (!days) return '';
       const d = new Date(Date.now() - days*86400000);
       return '>=' + d.toISOString().slice(0,10);
     }
 
-    function selectedExtraCwes() {
-      return $$('input[name=extra_cwe]:checked').map(c => c.value);
-    }
-    function updateExtraCount() {
-      const n = selectedExtraCwes().length;
-      $('#extra_cwes_count').textContent = n ? (n + ' CWE' + (n>1?'s':'')) : 'none';
+    // The full form as plain data. One shape feeds the API payload and the
+    // recent-search history, so a replayed search is byte-for-byte the same.
+    function formState() {
+      return {
+        categories: selectedCategories(),
+        include_extended: $('#include_extended').checked,
+        ecosystem: $('#ecosystem').value,
+        severity: $('#severity').value,
+        affects: $('#affects_pick').value,
+        published: $('#published').value,
+        max_results: parseInt($('#max_results').value) || 100,
+        sort: $('#sort').value,
+        direction: $('#direction').value,
+        type: $('#type').value,
+        sources: $$('input[name=source]:checked').map(c => c.value),
+      };
     }
 
-    function applyScenario(key) {
-      const s = SCENARIOS.find(x => x.key === key);
-      if (!s) return;
-      $$('input[name=category]').forEach(c => { c.checked = (s.categories||[]).includes(c.value); });
-      if (s.ecosystem) { $('#ecosystem').value = s.ecosystem; refreshPackages(); }
-      if (s.published) $('#published').value = s.published;
-      if ('include_extended' in s) $('#include_extended').checked = !!s.include_extended;
-      $('#severity').value = s.severity || 'any';
+    function setSelectValue(selector, value) {
+      const el = $(selector);
+      if (!el || value == null) return;
+      if (Array.from(el.options).some(o => o.value === value)) el.value = value;
+    }
+
+    function applyState(state) {
+      if (!state) return;
+      const categories = sanitizeCategories(state.categories);
+      PICKED.clear();
+      categories.forEach(key => {
+        if (key.indexOf('cwe:') === 0) PICKED.add(key.slice(4));
+      });
+      $$('input[name=category]').forEach(c => { c.checked = categories.includes(c.value); });
+      $('#include_extended').checked = state.include_extended !== false;
+      setSelectValue('#ecosystem', state.ecosystem);
+      refreshPackages();                       // options depend on the ecosystem
+      setSelectValue('#affects_pick', state.affects);
+      setSelectValue('#severity', state.severity);
+      setSelectValue('#published', state.published);
+      setSelectValue('#max_results', String(state.max_results || 100));
+      setSelectValue('#sort', state.sort);
+      setSelectValue('#direction', state.direction);
+      setSelectValue('#type', state.type);
+      const sources = (state.sources || []).filter(
+        s => $$('input[name=source]').some(box => box.value === s));
+      setSources(sources.length ? sources : ['ghsa']);
+      // Never replay a forced 10 MB OSV re-download from a history click.
+      $('#refresh_osv').checked = false;
+      renderSelection();
+    }
+
+    // localStorage is user-writable, so a restored query is re-validated here
+    // rather than trusted straight into the API.
+    function sanitizeCategories(values) {
+      if (!Array.isArray(values)) return [];
+      const known = new Set(CLASSES.map(c => c.key));
+      return values.filter(v => typeof v === 'string'
+        && (known.has(v) || /^cwe:[1-9][0-9]{0,6}$/.test(v)));
+    }
+
+    // === Recent searches ===
+    const HISTORY_KEY = 'vulnsight_history';
+    const HISTORY_MAX = 12;
+
+    function loadHistory() {
+      try {
+        const raw = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+        if (!Array.isArray(raw)) return [];
+        return raw.filter(e => e && typeof e.sig === 'string' && e.query
+          && sanitizeCategories(e.query.categories).length);
+      } catch (_) {
+        return [];
+      }
+    }
+
+    function saveHistory(list) {
+      try {
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(list.slice(0, HISTORY_MAX)));
+      } catch (_) {
+        // Quota or private mode: history is a convenience, never required state.
+      }
+    }
+
+    function stateSignature(state) {
+      return JSON.stringify([
+        state.categories.slice().sort(), state.include_extended, state.ecosystem,
+        state.severity, state.affects, state.published, state.max_results,
+        state.sort, state.direction, state.type, state.sources.slice().sort(),
+      ]);
+    }
+
+    function shortClassLabel(label) {
+      return label.split(' (')[0];
+    }
+
+    function historyLabel(state) {
+      const names = state.categories.map(key => {
+        if (key.indexOf('cwe:') === 0) return 'CWE-' + key.slice(4);
+        const cls = CLASSES.find(c => c.key === key);
+        return cls ? shortClassLabel(cls.label) : key;
+      });
+      const shown = names.slice(0, 2).join(' + ')
+        + (names.length > 2 ? ' +' + (names.length - 2) : '');
+      const parts = [shown || 'no target', state.ecosystem];
+      if (state.severity && state.severity !== 'any') parts.push(state.severity);
+      if (state.affects) parts.push(state.affects.split(':').pop());
+      if (state.published && state.published !== 'any') {
+        // Look the option up by value rather than interpolating into a selector.
+        const option = Array.from($('#published').options)
+          .find(o => o.value === state.published);
+        parts.push(option ? option.textContent.trim() : state.published);
+      }
+      return parts.join(' · ');
+    }
+
+    function recordHistory(state, count) {
+      const sig = stateSignature(state);
+      const list = loadHistory().filter(e => e.sig !== sig);
+      list.unshift({
+        sig: sig,
+        at: Date.now(),
+        count: count,
+        label: historyLabel(state),
+        query: state,
+      });
+      saveHistory(list);
+      renderHistory();
+    }
+
+    function relativeTime(ms) {
+      // A missing or corrupted timestamp must not render as "20685d ago";
+      // note that Number(null) is 0, so a plain isFinite check is not enough.
+      const at = Number(ms);
+      if (!at || !Number.isFinite(at)) return 'just now';
+      const mins = Math.round((Date.now() - at) / 60000);
+      if (mins < 1) return 'just now';
+      if (mins < 60) return mins + 'm ago';
+      const hours = Math.round(mins / 60);
+      if (hours < 24) return hours + 'h ago';
+      const days = Math.round(hours / 24);
+      return days === 1 ? 'yesterday' : days + 'd ago';
+    }
+
+    function renderHistory() {
+      const list = loadHistory();
+      const section = $('#history-section');
+      section.hidden = list.length === 0;
+      $('#history-list').innerHTML = list.map((entry, index) => {
+        const count = Number(entry.count) || 0;
+        return `<li class="history-item">
+          <button type="button" class="history-run" data-index="${index}"
+              title="${safeAttr(entry.label || '')} — click to restore and search again">
+            <span class="history-label">${esc(entry.label || '')}</span>
+            <span class="history-meta">
+              <span class="history-count">${count} hit${count === 1 ? '' : 's'}</span>
+              <span class="history-when">${esc(relativeTime(entry.at))}</span>
+            </span>
+          </button>
+          <button type="button" class="history-drop" data-index="${index}"
+              aria-label="Forget ${safeAttr(entry.label || 'this search')}">×</button>
+        </li>`;
+      }).join('');
+    }
+
+
+    // === CWE / bug-name finder ===
+    // The whole MITRE catalog is fetched once and searched in memory, so typing
+    // never costs a round trip. A picked CWE becomes the pseudo-class "cwe:<id>",
+    // which the backend treats exactly like a curated bug class.
+    const COMBO_LIMIT = 40;
+    const PICKED = new Set();      // bare CWE ids, e.g. "639"
+    let ENTRIES = [];              // searchable rows: curated classes + every CWE
+    let comboMatches = [];
+    let comboActive = -1;
+    let catalogError = '';
+
+    CLASSES.forEach(c => { c.cwes = (c.core || []).concat(c.extended || []); });
+
+    // CWE id -> the curated classes that already cover it.
+    const CLASS_BY_CWE = {};
+    CLASSES.forEach(c => c.cwes.forEach(id => {
+      (CLASS_BY_CWE[id] = CLASS_BY_CWE[id] || []).push(c);
+    }));
+
+    function classEntries() {
+      return CLASSES.map(c => ({
+        kind: 'class',
+        key: c.key,
+        // Curated short code, not the raw key: "DESERIALIZATION" would overflow
+        // the fixed-width code column and squeeze every CWE name beside it.
+        code: c.code || c.key.toUpperCase(),
+        label: c.label,
+        note: (c.cwes || []).length + ' CWEs',
+        aliases: [],
+        hay: (c.key + ' ' + c.label + ' ' + (c.description || '')).toLowerCase(),
+      }));
+    }
+
+    function buildEntries(payload) {
+      const rows = (payload && payload.rows) || [];
+      ENTRIES = classEntries().concat(rows.map(row => {
+        const [id, label, aliasText, level] = row;
+        const aliases = aliasText ? aliasText.split('|') : [];
+        return {
+          kind: 'cwe',
+          key: 'cwe:' + id,
+          id: id,
+          code: 'CWE-' + id,
+          label: label,
+          note: level,
+          aliases: aliases,
+          hay: (id + ' ' + label + ' ' + aliasText).toLowerCase(),
+        };
+      }));
+    }
+
+    async function loadCweCatalog() {
+      // Curated classes are searchable before the catalog request resolves, and
+      // remain searchable if it never does.
+      ENTRIES = classEntries();
+      try {
+        const r = await fetch('/api/cwes', {headers: {'accept': 'application/json'}});
+        if (!r.ok) throw new Error('catalog request failed (' + r.status + ')');
+        buildEntries(await r.json());
+      } catch (e) {
+        catalogError = e.message;
+        toast('CWE catalog failed to load: ' + e.message, 'err');
+      }
+    }
+
+    function escapeRe(s) {
+      return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    // Higher score = better match. Ordering is what makes a 944-row catalog
+    // usable: exact ID, then ID prefix, then exact/prefix name or alias, then
+    // "contains every word".
+    function scoreEntry(entry, q, idQuery, tokens, boundary) {
+      let score = 0;
+      if (entry.kind === 'cwe' && idQuery) {
+        if (entry.id === idQuery) return 2000;
+        if (entry.id.startsWith(idQuery)) score = 1200 - entry.id.length;
+      }
+      const label = entry.label.toLowerCase();
+      const aliases = entry.aliases.map(a => a.toLowerCase());
+      let text = 0;
+      if (label === q || aliases.includes(q)) text = 900;
+      else if (label.startsWith(q) || aliases.some(a => a.startsWith(q))) text = 800;
+      else if (boundary.test(entry.hay)) text = 700;
+      else if (tokens.length > 1 && tokens.every(t => entry.hay.includes(t))) text = 600;
+      else if (entry.hay.includes(q)) text = 500;
+      score = Math.max(score, text);
+      if (!score) return 0;
+      // A curated class beats a lone CWE, and a CWE a class already covers
+      // beats an unrelated one — both are the likelier intent.
+      if (entry.kind === 'class') score += 60;
+      else if (CLASS_BY_CWE[entry.id]) score += 30;
+      return score;
+    }
+
+    function searchEntries(raw) {
+      const q = raw.trim().toLowerCase();
+      if (!q) return [];
+      const idQuery = /^(cwe[-\s]?)?\d+$/.test(q) ? q.replace(/^cwe[-\s]?/, '') : '';
+      const tokens = q.split(/\s+/).filter(Boolean);
+      const boundary = new RegExp('\\b' + escapeRe(q));
+      const scored = [];
+      for (const entry of ENTRIES) {
+        const score = scoreEntry(entry, q, idQuery, tokens, boundary);
+        if (score > 0) scored.push([score, entry]);
+      }
+      scored.sort((a, b) => b[0] - a[0]
+        || (a[1].kind === 'cwe' && b[1].kind === 'cwe' ? Number(a[1].id) - Number(b[1].id) : 0)
+        || a[1].label.localeCompare(b[1].label));
+      return scored.slice(0, COMBO_LIMIT).map(pair => pair[1]);
+    }
+
+    function isPicked(entry) {
+      return entry.kind === 'class'
+        ? $$('input[name=category]').some(c => c.value === entry.key && c.checked)
+        : PICKED.has(entry.id);
+    }
+
+    // Two rows: code + full name + level, then the aliases and the curated class
+    // that already covers this CWE. The name gets the space it needs; the
+    // secondary line is what truncates.
+    function comboOptionHtml(entry, index) {
+      // The sidebar is ~300px wide, so the covering class is shown as its short
+      // key ("BAC") with the full name on hover — the CWE name gets the room.
+      const cls = entry.kind === 'cwe' && (CLASS_BY_CWE[entry.id] || [])[0];
+      const covered = cls
+        ? `<span class="combo-in" title="Already covered by ${safeAttr(cls.label)}">${esc(cls.code || cls.key.toUpperCase())}</span>`
+        : '';
+      const aliasText = entry.aliases.join(' · ');
+      const aliases = entry.aliases.length
+        ? `<span class="combo-alias" title="${safeAttr(aliasText)}">${esc(entry.aliases.slice(0, 3).join(' · '))}</span>` : '';
+      const sub = aliases || covered
+        ? `<span class="combo-sub">${aliases}${covered}</span>` : '';
+      return `<li class="combo-option ${entry.kind}${isPicked(entry) ? ' picked' : ''}"
+          role="option" id="cwe-option-${index}" data-key="${safeAttr(entry.key)}"
+          aria-selected="${index === comboActive}">
+        <span class="combo-head">
+          <span class="combo-code">${esc(entry.code)}</span>
+          <span class="combo-label" title="${safeAttr(entry.label)}">${esc(entry.label)}</span>
+          <span class="combo-note">${esc(entry.note)}</span>
+        </span>
+        ${sub}
+      </li>`;
+    }
+
+    function renderCombo() {
+      const list = $('#cwe-options');
+      const input = $('#cwe-search');
+      const query = input.value.trim();
+      $('#cwe-clear').hidden = !query;
+      if (!query) {
+        list.hidden = true;
+        list.innerHTML = '';
+        input.setAttribute('aria-expanded', 'false');
+        input.removeAttribute('aria-activedescendant');
+        return;
+      }
+      comboMatches = searchEntries(query);
+      if (!comboMatches.length) {
+        const why = catalogError ? 'CWE catalog unavailable' : 'No bug class or CWE matches';
+        list.innerHTML = `<li class="combo-empty">${esc(why)} “${esc(query)}”</li>`;
+      } else {
+        if (comboActive >= comboMatches.length) comboActive = comboMatches.length - 1;
+        list.innerHTML = comboMatches.map(comboOptionHtml).join('');
+      }
+      list.hidden = false;
+      input.setAttribute('aria-expanded', 'true');
+      const active = comboActive >= 0 && comboMatches.length ? `cwe-option-${comboActive}` : '';
+      if (active) input.setAttribute('aria-activedescendant', active);
+      else input.removeAttribute('aria-activedescendant');
+    }
+
+    function closeCombo() {
+      comboActive = -1;
+      comboMatches = [];
+      const list = $('#cwe-options');
+      list.hidden = true;
+      list.innerHTML = '';
+      $('#cwe-search').setAttribute('aria-expanded', 'false');
+      $('#cwe-search').removeAttribute('aria-activedescendant');
+    }
+
+    function moveComboActive(delta) {
+      if (!comboMatches.length) return;
+      const last = comboMatches.length - 1;
+      comboActive = comboActive < 0
+        ? (delta > 0 ? 0 : last)
+        : Math.min(last, Math.max(0, comboActive + delta));
+      renderCombo();
+      const el = $(`#cwe-option-${comboActive}`);
+      if (el) el.scrollIntoView({block: 'nearest'});
+    }
+
+    function announceSelection(message) {
+      $('#selection-live').textContent = message;
+    }
+
+    function pickEntry(entry) {
+      if (!entry) return;
+      if (entry.kind === 'class') {
+        const box = $$('input[name=category]').find(c => c.value === entry.key);
+        if (box) {
+          box.checked = true;
+          box.closest('.cat').classList.add('just-added');
+          setTimeout(() => box.closest('.cat').classList.remove('just-added'), 900);
+        }
+        announceSelection(entry.label + ' class added');
+      } else {
+        PICKED.add(entry.id);
+        announceSelection(entry.code + ' added');
+      }
+      $('#cwe-search').value = '';
+      closeCombo();
+      renderSelection();
+      $('#cwe-search').focus();
+    }
+
+    function selectedCweKeys() {
+      return Array.from(PICKED).sort((a, b) => Number(a) - Number(b)).map(id => 'cwe:' + id);
+    }
+
+    function cweEntry(id) {
+      return ENTRIES.find(e => e.kind === 'cwe' && e.id === id);
+    }
+
+    function renderSelection() {
+      const classBoxes = $$('input[name=category]:checked');
+      const ids = Array.from(PICKED).sort((a, b) => Number(a) - Number(b));
+      const chips = classBoxes.map(box => {
+        const cls = CLASSES.find(c => c.key === box.value);
+        const label = cls ? cls.label : box.value;
+        return `<span class="chip chip-class" role="listitem">
+          <span class="chip-text" title="${safeAttr(label)}">${esc(label)}</span>
+          <button type="button" class="chip-x" data-drop-class="${safeAttr(box.value)}"
+            aria-label="Remove ${safeAttr(label)}">×</button>
+        </span>`;
+      }).concat(ids.map(id => {
+        const entry = cweEntry(id);
+        const label = entry ? entry.label : 'CWE-' + id;
+        return `<span class="chip chip-cwe" role="listitem">
+          <span class="chip-code">CWE-${esc(id)}</span>
+          <span class="chip-text" title="${safeAttr(label)}">${esc(label)}</span>
+          <button type="button" class="chip-x" data-drop-cwe="${safeAttr(id)}"
+            aria-label="Remove CWE-${safeAttr(id)}">×</button>
+        </span>`;
+      }));
+      $('#selected-chips').innerHTML = chips.length
+        ? chips.join('')
+        : '<span class="chips-empty">Nothing selected — search above or tick a class.</span>';
+      const total = classBoxes.length + ids.length;
+      $('#selection-count').textContent = total
+        ? `${total} selected · ${total} AI pass${total > 1 ? 'es' : ''} per advisory`
+        : '';
+      updateNvdHint();
+    }
+
+    // NVD costs one rate-limited request per CWE, so make that cost visible
+    // before the user starts a search that would take minutes.
+    function updateNvdHint() {
+      const hint = $('.nvd-hint');
+      if (!hint) return;
+      const cwes = estimatedCweCount();
+      const seconds = Math.round(cwes * 7);
+      hint.textContent = $('input[name=source][value=nvd]').checked && cwes > 1
+        ? `NVD: ~${cwes} CWEs × ~7s ≈ ${seconds}s without NVD_API_KEY. Free key at nvd.nist.gov`
+        : 'Without NVD_API_KEY, queries take ~7s per CWE. Free key at nvd.nist.gov';
+    }
+
+    // Exactly what resolve_cwes() will produce server-side for this selection.
+    function estimatedCweCount() {
+      const extended = $('#include_extended').checked;
+      const set = new Set(PICKED);
+      $$('input[name=category]:checked').forEach(box => {
+        const cls = CLASSES.find(c => c.key === box.value);
+        if (!cls) return;
+        (cls.core || []).forEach(id => set.add(id));
+        if (extended) (cls.extended || []).forEach(id => set.add(id));
+      });
+      return set.size;
     }
 
     function toast(msg, kind='') {
@@ -292,14 +720,14 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = wind
     }
 
     async function search() {
-      const cats = selectedCategories();
-      if (!cats.length) { toast('Select at least one bug class', 'err'); return; }
+      const state = formState();
+      if (!state.categories.length) { toast('Select a bug class or a CWE', 'err'); return; }
       if (document.body.classList.contains('filters-open')) setFilterPanel(false, false);
       $('#search-btn').disabled = true;
       setResultsBusy(true);
       $('#results').innerHTML = `<div class="loading"><span class="spinner"></span>Searching advisories…</div>`;
       $('#summary').textContent = 'Searching…';
-      const sources = $$('input[name=source]:checked').map(c => c.value);
+      const sources = state.sources;
       if (!sources.length) {
         toast('Select at least one data source', 'err');
         $('#search-btn').disabled = false;
@@ -311,21 +739,10 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = wind
       LAST = [];
       AI = {};
       updateActionButtons();
-      const payload = {
-        categories: cats,
-        include_extended: $('#include_extended').checked,
-        ecosystem: $('#ecosystem').value,
-        severity: $('#severity').value,
-        affects: $('#affects_pick').value,
-        published: publishedFilter(),
-        max_results: parseInt($('#max_results').value) || 100,
-        extra_cwes: selectedExtraCwes(),
-        sort: $('#sort').value,
-        direction: $('#direction').value,
-        type: $('#type').value,
-        sources: sources,
+      const payload = Object.assign({}, state, {
+        published: publishedWindow(state.published),
         refresh_osv: $('#refresh_osv').checked,
-      };
+      });
       if (sources.includes('nvd')) {
         $('#results').innerHTML = `<div class="loading"><span class="spinner"></span>Fetching… (NVD is rate-limited — may take a moment per CWE)</div>`;
       } else if (sources.includes('osv')) {
@@ -345,6 +762,7 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = wind
         $('#ai-btn').disabled = LAST.length === 0;
         $('#only_match').disabled = LAST.length === 0;
         $('#only_match').checked = false;
+        recordHistory(state, data.count);
         render();
       } catch (e) {
         $('#results').innerHTML = `<div class="empty">❌ ${esc(e.message)}</div>`;
@@ -523,7 +941,7 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = wind
     async function autoRun() {
       if ($('#auto-btn').disabled) return;
       const cats = selectedCategories();
-      if (!cats.length) { toast('Select at least one bug class', 'err'); return; }
+      if (!cats.length) { toast('Select a bug class or a CWE', 'err'); return; }
       const eco = $('#ecosystem').value;
       const osvOk = OSV_SUPPORTED.includes(eco);
       // GHSA covers CWE-tagged advisories; OSV-native adds the no-CWE records the
@@ -574,8 +992,79 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = wind
     $('#ecosystem').addEventListener('change', refreshPackages);
     $('#sort').addEventListener('change', () => { if (LAST.length) render(); });
     $('#direction').addEventListener('change', () => { if (LAST.length) render(); });
-    $('#scenario').addEventListener('change', e => applyScenario(e.target.value));
-    $$('input[name=extra_cwe]').forEach(c => c.addEventListener('change', updateExtraCount));
+
+    // --- CWE finder ---
+    $('#cwe-search').addEventListener('input', () => { comboActive = -1; renderCombo(); });
+    $('#cwe-search').addEventListener('keydown', e => {
+      if (e.key === 'ArrowDown') { e.preventDefault(); moveComboActive(1); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); moveComboActive(-1); }
+      else if (e.key === 'Enter') {
+        e.preventDefault();
+        pickEntry(comboMatches[comboActive >= 0 ? comboActive : 0]);
+      } else if (e.key === 'Escape' && !$('#cwe-options').hidden) {
+        e.stopPropagation();          // keep Escape from closing the whole panel
+        closeCombo();
+      }
+    });
+    $('#cwe-search').addEventListener('focus', renderCombo);
+    $('#cwe-clear').addEventListener('click', () => {
+      $('#cwe-search').value = '';
+      closeCombo();
+      $('#cwe-clear').hidden = true;
+      $('#cwe-search').focus();
+    });
+    $('#cwe-options').addEventListener('mousedown', e => {
+      // mousedown, not click: the input's blur handler would close the list first.
+      const option = e.target.closest('.combo-option');
+      if (!option) return;
+      e.preventDefault();
+      pickEntry(comboMatches.find(entry => entry.key === option.dataset.key));
+    });
+    $('#selected-chips').addEventListener('click', e => {
+      const button = e.target.closest('.chip-x');
+      if (!button) return;
+      const cwe = button.dataset.dropCwe;
+      const cls = button.dataset.dropClass;
+      if (cwe) {
+        PICKED.delete(cwe);
+        announceSelection('CWE-' + cwe + ' removed');
+      } else if (cls) {
+        const box = $$('input[name=category]').find(c => c.value === cls);
+        if (box) box.checked = false;
+        announceSelection('class removed');
+      }
+      renderSelection();
+    });
+    $$('input[name=category]').forEach(box => box.addEventListener('change', renderSelection));
+
+    // --- Recent searches ---
+    $('#history-list').addEventListener('click', e => {
+      const run = e.target.closest('.history-run');
+      const drop = e.target.closest('.history-drop');
+      const list = loadHistory();
+      if (drop) {
+        list.splice(Number(drop.dataset.index), 1);
+        saveHistory(list);
+        renderHistory();
+        return;
+      }
+      if (!run) return;
+      const entry = list[Number(run.dataset.index)];
+      if (!entry) return;
+      applyState(entry.query);
+      search();
+    });
+    $('#history-clear').addEventListener('click', () => {
+      saveHistory([]);
+      renderHistory();
+      toast('Recent searches cleared', 'ok');
+    });
+    $('#include_extended').addEventListener('change', updateNvdHint);
+    $$('input[name=source]').forEach(box => box.addEventListener('change', updateNvdHint));
+    document.addEventListener('mousedown', e => {
+      const finder = $('.cwe-finder');
+      if (finder && !finder.contains(e.target)) closeCombo();
+    });
     $$('.export-pop button').forEach(b => b.addEventListener('click', () => doExport(b.dataset.fmt)));
     // Close the export menu when clicking outside it.
     document.addEventListener('click', e => {
@@ -599,10 +1088,13 @@ const { POPULAR, SCENARIOS, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = wind
       }
     });
 
-    // Initial population.
+    // Initial population. The catalog load is fire-and-forget: classes are
+    // searchable immediately and CWE rows appear as soon as it lands.
     refreshPackages();
-    updateExtraCount();
+    renderSelection();
+    renderHistory();
     updateActionButtons();
+    loadCweCatalog().then(renderSelection);
     if (AUTH_REQUIRED) {
       $('#auth-save').addEventListener('click', saveAuthToken);
       $('#auth-token').addEventListener('keydown', e => {

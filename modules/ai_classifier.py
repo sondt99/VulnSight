@@ -42,7 +42,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
-from .cwe_categories import CATEGORIES, cwe_label
+from .cwe_categories import category_cwes, category_description, category_label, cwe_label
 
 logger = logging.getLogger(__name__)
 
@@ -415,11 +415,13 @@ _SYSTEM_PROMPT = (
 
 
 def _build_user_prompt(adv: dict, category: str) -> str:
-    cat = CATEGORIES.get(category, {})
-    label = cat.get("label", category)
-    desc = cat.get("description", "")
+    # `category` is either a curated bug class ("bac") or a single CWE picked
+    # from the MITRE catalog ("cwe:1321"); both resolve to a label, a definition
+    # and a representative CWE set.
+    label = category_label(category)
+    desc = category_description(category)
     cwe_lines = ", ".join(f"CWE-{c} ({cwe_label(c)})"
-                          for c in (cat.get("core", []) + cat.get("extended", [])))
+                          for c in category_cwes(category, include_extended=True))
     adv_cwes = ", ".join(adv.get("cwes") or []) or "none"
     packages = ", ".join(
         f"{p.get('ecosystem')}:{p.get('name')}" for p in (adv.get("packages") or [])
