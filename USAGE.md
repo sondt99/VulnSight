@@ -83,6 +83,18 @@ limit. The tool handles this at three levels:
 - **Backend retry** — each classification retries up to 3× with exponential
   backoff on transient failures (HTTP 429/5xx/timeouts *and* truncated/empty
   replies). `max_tokens` is set high (2000) so the reasoning + JSON both fit.
+- **Key rotation that remembers** — `TOKEN` may hold several comma-separated
+  keys. When one is refused for quota it is put in cooldown and skipped, so the
+  same dead key is not paid for twice. Two things make that actually hold:
+  the config object is reused across requests (a fresh one per request used to
+  forget which keys were exhausted and re-discover them by spending a real call
+  on each), and the cooldown is persisted to `.ai_key_cooldown.json` — as a
+  hash of the key, never the key — so a restart does not re-learn it either.
+  Measured with 3 of 5 keys exhausted over 10 requests: **20 wasted calls → 3**,
+  which is the unavoidable one-per-dead-key discovery cost.
+  When the provider states *when* the limit resets, that time is used instead of
+  a fixed guess, capped by the guess — a 5-hour limit that resets in 2 hours
+  gives the key back after 2, rather than idling it for 5.
 - **Auto-retry** — after **Refine with AI**, any advisories still erroring are
   retried automatically for up to 3 more rounds.
 - **↻ Retry failed (N)** — a button that re-runs only the ones still failing,

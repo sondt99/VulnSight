@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import random
+import re
 import threading
 import time
 import urllib.error
@@ -41,7 +42,9 @@ import urllib.request
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
+from . import config
 from .cwe_categories import category_cwes, category_description, category_label, cwe_label
 
 logger = logging.getLogger(__name__)
@@ -112,15 +115,88 @@ _RATE_MARKERS = (
 )
 
 
+_CONFIG_CACHE: dict[tuple, "AIConfig"] = {}
+_CONFIG_CACHE_MAX = 8
+_CONFIG_LOCK = threading.Lock()
+
+# Where key cooldowns survive a restart. Sits next to the advisory cache and is
+# git-ignored; holds only SHA-256 prefixes of the keys, never the keys.
+COOLDOWN_PATH = os.path.join(config.BASE_DIR, ".ai_key_cooldown.json")
+
+
+def _read_cooldown_file() -> dict[str, float]:
+    try:
+        with open(COOLDOWN_PATH, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (FileNotFoundError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    now = time.time()
+    return {
+        str(key): float(value) for key, value in data.items()
+        if isinstance(value, (int, float)) and float(value) > now
+    }
+
+
+def _write_cooldown_file(state: dict[str, float]) -> None:
+    tmp = COOLDOWN_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(state, handle)
+    os.replace(tmp, COOLDOWN_PATH)
+
+
+_RESET_AT_RE = re.compile(
+    r"reset(?:s)?\s+at\s+(\d{4}-\d{2}-\d{2})[ tT](\d{2}:\d{2}(?::\d{2})?)")
+
+
+def _parse_reset_at(detail: str) -> float | None:
+    """Seconds until the reset timestamp the provider stated, if it gave one.
+
+    The timestamp carries no timezone ("... will reset at 2026-08-21 14:42:52"),
+    so it is read against both UTC and local time and the *nearer* reading wins.
+    Guessing early costs one wasted call; guessing late throws away a key that
+    already works, which is the more expensive mistake.
+    """
+    match = _RESET_AT_RE.search(detail or "")
+    if not match:
+        return None
+    stamp = f"{match.group(1)} {match.group(2)}"
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            parsed = datetime.strptime(stamp, fmt)
+        except ValueError:
+            continue
+        naive_utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
+        candidates = [
+            (parsed - naive_utc_now).total_seconds(),
+            (parsed - datetime.now()).total_seconds(),
+        ]
+        future = [seconds for seconds in candidates if seconds > 0]
+        return min(future) if future else 0.0
+    return None
+
+
 def _quota_skip_seconds(detail: str) -> float:
+    """How long to stop using a key whose quota the provider just refused.
+
+    The heuristic below is the ceiling; when the provider tells us when the
+    limit resets we use that instead, because it is usually *sooner* and the
+    key is otherwise idle for hours it did not need to be.
+    """
     text = (detail or "").lower()
     if "5 hour" in text or "5-hour" in text:
-        return 5 * 3600
-    if "week" in text or "month" in text:
-        return 12 * 3600
-    if "fair usage" in text:
-        return 6 * 3600
-    return 6 * 3600
+        ceiling = 5 * 3600
+    elif "week" in text or "month" in text:
+        ceiling = 12 * 3600
+    else:
+        ceiling = 6 * 3600
+    stated = _parse_reset_at(text)
+    if stated is None:
+        return ceiling
+    # Never wait longer than the heuristic (the timestamp may be in a timezone
+    # we guessed wrong) and never hammer the key immediately either.
+    return max(60.0, min(stated, ceiling))
 
 
 def _classify_http_error(status: int, detail: str) -> tuple[bool, bool, float]:
@@ -156,11 +232,28 @@ class AIConfig:
 
     @property
     def token(self) -> str:
-        """Current active token (thread-safe read)."""
+        """The next token that is not in cooldown (thread-safe).
+
+        Returning the current index blindly meant a key we already knew was
+        exhausted got another real request spent on it — once per call, in front
+        of a user-visible operation — before rotation kicked in. Skip it here so
+        the failure is never paid for twice.
+        """
         if not self.tokens:
             return ""
         with self._lock:
-            return self.tokens[self._current_idx % len(self.tokens)]
+            count = len(self.tokens)
+            now = time.monotonic()
+            for step in range(count):
+                idx = (self._current_idx + step) % count
+                if self._skip_until.get(idx, 0) <= now:
+                    self._current_idx = idx
+                    return self.tokens[idx]
+            # Everything is cooling down: use whichever frees up soonest, so the
+            # caller's retry lands on the best available key.
+            idx = min(range(count), key=lambda i: self._skip_until.get(i, 0))
+            self._current_idx = idx
+            return self.tokens[idx]
 
     def rotate_token(self) -> bool:
         """Advance to the next live token. Returns False if none remain."""
@@ -188,7 +281,42 @@ class AIConfig:
                 if value == token:
                     self._skip_until[i] = max(self._skip_until.get(i, 0), now + seconds)
                     logger.info("Skipping API key #%d for %.0fs", i + 1, seconds)
+                    self._persist_cooldown(value, seconds)
                     return
+
+    # -- cooldown persistence -------------------------------------------------
+    # A restart would otherwise re-learn which keys are exhausted by spending a
+    # real request on each one. Only a hash of the key is written, never the key.
+
+    @staticmethod
+    def _token_fingerprint(token: str) -> str:
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()[:32]
+
+    def _persist_cooldown(self, token: str, seconds: float) -> None:
+        try:
+            state = _read_cooldown_file()
+            state[self._token_fingerprint(token)] = time.time() + seconds
+            _write_cooldown_file(state)
+        except OSError:
+            pass          # a cache we cannot write is not a reason to fail a scan
+
+    def load_cooldowns(self) -> None:
+        """Restore cooldowns recorded by an earlier process."""
+        try:
+            state = _read_cooldown_file()
+        except OSError:
+            return
+        if not state:
+            return
+        wall_now = time.time()
+        mono_now = time.monotonic()
+        with self._lock:
+            for index, token in enumerate(self.tokens):
+                until = state.get(self._token_fingerprint(token))
+                if until and until > wall_now:
+                    self._skip_until[index] = mono_now + (until - wall_now)
+                    logger.info("API key #%d still cooling down for %.0fs",
+                                index + 1, until - wall_now)
 
     def live_indices(self) -> list[int]:
         now = time.monotonic()
@@ -228,13 +356,27 @@ def load_config(provider: str | None = None) -> AIConfig:
                 or os.environ.get("CVE_AI_PROVIDER", "anthropic")).strip().lower()
     raw_token = _env(provider, "TOKEN")
     tokens = [t.strip() for t in raw_token.split(",") if t.strip()] if raw_token else []
-    return AIConfig(
-        provider=provider,
-        base_url=_env(provider, "BASE_URL")
-                 or _PROVIDER_DEFAULT_BASE_URL.get(provider, ""),
-        tokens=tokens,
-        model=_env(provider, "MODEL"),
-    )
+    base_url = (_env(provider, "BASE_URL")
+                or _PROVIDER_DEFAULT_BASE_URL.get(provider, ""))
+    model = _env(provider, "MODEL")
+
+    # Reuse the instance for identical credentials. The environment is still read
+    # on every call, so a .env edit is picked up — but a *fresh* object each time
+    # threw away which keys are exhausted, and every request then re-discovered
+    # them by spending a real call on each. Rotation state has to outlive the
+    # request that learned it.
+    identity = (provider, base_url, model, tuple(tokens))
+    with _CONFIG_LOCK:
+        cached = _CONFIG_CACHE.get(identity)
+        if cached is not None:
+            return cached
+        config = AIConfig(provider=provider, base_url=base_url,
+                          tokens=tokens, model=model)
+        config.load_cooldowns()
+        if len(_CONFIG_CACHE) >= _CONFIG_CACHE_MAX:
+            _CONFIG_CACHE.clear()          # credentials changed repeatedly
+        _CONFIG_CACHE[identity] = config
+        return config
 
 
 # ---------------------------------------------------------------------------

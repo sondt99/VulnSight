@@ -10,7 +10,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import tempfile
 import unittest
+from datetime import datetime, timedelta
 from unittest import mock
 
 import io
@@ -414,3 +416,101 @@ class TestVerdictKeying(unittest.TestCase):
             out = ai_classifier.classify_many(
                 cfg, [{"ghsa_id": "GHSA-x"}, {"cve_id": "CVE-2026-9"}], "bac")
         self.assertEqual(sorted(out), ["CVE-2026-9", "GHSA-x"])
+
+
+class TestKeyRotationCost(unittest.TestCase):
+    """An exhausted key must never cost a second wasted request."""
+
+    def _config(self, keys=3):
+        return ai_classifier.AIConfig(
+            "glm", "https://x", [f"key{i}" for i in range(keys)], "m")
+
+    def test_token_skips_a_key_that_is_cooling_down(self):
+        cfg = self._config()
+        cfg.mark_skip_token("key0", 3600)
+        self.assertEqual(cfg.token, "key1")
+        cfg.mark_skip_token("key1", 3600)
+        self.assertEqual(cfg.token, "key2")
+
+    def test_all_keys_cooling_down_picks_the_one_that_frees_up_soonest(self):
+        cfg = self._config()
+        cfg.mark_skip_token("key0", 9000)
+        cfg.mark_skip_token("key1", 120)      # soonest
+        cfg.mark_skip_token("key2", 4000)
+        self.assertEqual(cfg.token, "key1")
+
+    def test_reset_timestamp_from_the_provider_beats_the_heuristic(self):
+        # A 5-hour limit that resets in ~2h must not idle the key for 5h.
+        soon = (datetime.now() + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+        detail = ("usage limit reached for 5 hour. "
+                  f"your limit will reset at {soon}")
+        seconds = ai_classifier._quota_skip_seconds(detail)
+        self.assertLess(seconds, 5 * 3600)
+        self.assertGreater(seconds, 3600)
+
+    def test_a_stated_reset_is_never_trusted_beyond_the_heuristic(self):
+        far = (datetime.now() + timedelta(days=6)).strftime("%Y-%m-%d %H:%M:%S")
+        detail = f"weekly/monthly limit exhausted. your limit will reset at {far}"
+        # The timestamp has no timezone, so it caps at the heuristic ceiling.
+        self.assertEqual(ai_classifier._quota_skip_seconds(detail), 12 * 3600)
+
+    def test_no_timestamp_falls_back_to_the_heuristic(self):
+        self.assertEqual(
+            ai_classifier._quota_skip_seconds("usage limit reached for 5 hour"),
+            5 * 3600)
+        self.assertEqual(
+            ai_classifier._quota_skip_seconds("quota exceeded"), 6 * 3600)
+
+    def test_a_past_timestamp_does_not_produce_a_negative_cooldown(self):
+        past = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+        seconds = ai_classifier._quota_skip_seconds(
+            f"quota exhausted. will reset at {past}")
+        self.assertGreaterEqual(seconds, 60)
+
+
+class TestConfigReuse(unittest.TestCase):
+    """Rotation state has to outlive the request that learned it."""
+
+    def setUp(self):
+        ai_classifier._CONFIG_CACHE.clear()
+        self.env = mock.patch.dict(os.environ, {
+            "CVE_AI_PROVIDER": "glm", "GLM_TOKEN": "a,b,c",
+            "GLM_BASE_URL": "https://x", "GLM_MODEL": "m",
+        }, clear=False)
+        self.env.start()
+        self.cooldown = mock.patch.object(
+            ai_classifier, "COOLDOWN_PATH",
+            os.path.join(tempfile.mkdtemp(), "cooldown.json"))
+        self.cooldown.start()
+
+    def tearDown(self):
+        self.cooldown.stop()
+        self.env.stop()
+        ai_classifier._CONFIG_CACHE.clear()
+
+    def test_identical_credentials_reuse_the_same_instance(self):
+        first = ai_classifier.load_config()
+        first.mark_skip_token("a", 3600)
+        second = ai_classifier.load_config()
+        self.assertIs(second, first)
+        # The key learned to be exhausted is still skipped on the next call.
+        self.assertEqual(second.token, "b")
+
+    def test_changed_credentials_produce_a_new_instance(self):
+        first = ai_classifier.load_config()
+        with mock.patch.dict(os.environ, {"GLM_TOKEN": "d,e"}, clear=False):
+            second = ai_classifier.load_config()
+        self.assertIsNot(second, first)
+        self.assertEqual(second.tokens, ["d", "e"])
+
+    def test_cooldowns_survive_a_restart_without_storing_the_key(self):
+        first = ai_classifier.load_config()
+        first.mark_skip_token("a", 3600)
+        on_disk = open(ai_classifier.COOLDOWN_PATH, encoding="utf-8").read()
+        self.assertNotIn("a", json.loads(on_disk).keys())   # hashed, not raw
+        self.assertNotIn('"a"', on_disk)
+
+        ai_classifier._CONFIG_CACHE.clear()                 # simulate a restart
+        restarted = ai_classifier.load_config()
+        self.assertIsNot(restarted, first)
+        self.assertEqual(restarted.token, "b", "cooldown was not restored")

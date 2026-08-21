@@ -13,3 +13,4 @@ advisories.db-wal
 advisories.db-shm
 osv_cache/
 .vulnsight_api_token
+.ai_key_cooldown.json
