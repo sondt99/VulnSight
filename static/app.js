@@ -173,7 +173,7 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AI_CALL_BUDGET, AUTH_REQ
       const sources = (state.sources || []).filter(
         s => $$('input[name=source]').some(box => box.value === s));
       setSources(sources.length ? sources : ['ghsa']);
-      // Never replay a forced 10 MB OSV re-download from a history click — but
+      // Never replay a forced OSV re-download (up to ~220 MB) from a click — but
       // say so, rather than silently unticking a box the user just ticked.
       if ($('#refresh_osv').checked) {
         $('#refresh_osv').checked = false;
@@ -1013,7 +1013,7 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AI_CALL_BUDGET, AUTH_REQ
       if (sources.includes('nvd')) {
         $('#results').innerHTML = `<div class="loading"><span class="spinner"></span>Fetching… (NVD is rate-limited — may take a moment per CWE)</div>`;
       } else if (sources.includes('osv')) {
-        $('#results').innerHTML = `<div class="loading"><span class="spinner"></span>Fetching… (OSV may download a ~10MB list on first use)</div>`;
+        $('#results').innerHTML = `<div class="loading"><span class="spinner"></span>Fetching… (OSV downloads the ecosystem's full export on first use — ~10 MB for maven/go, ~220 MB for npm)</div>`;
       }
       try {
         const data = await apiPost('/api/search', payload);

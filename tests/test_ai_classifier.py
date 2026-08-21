@@ -383,3 +383,34 @@ class TestClassify(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestVerdictKeying(unittest.TestCase):
+    """Verdicts must never be attributed to the wrong advisory."""
+
+    def test_advisories_without_an_id_cannot_overwrite_each_other(self):
+        cfg = ai_classifier.AIConfig("anthropic", "https://x", ["tok"], "M")
+        advisories = [
+            {"summary": "first, no identifiers at all"},
+            {"summary": "second, no identifiers at all"},
+        ]
+        with mock.patch.object(
+            ai_classifier, "classify_one",
+            side_effect=AssertionError("must not be classified without an id"),
+        ):
+            out = ai_classifier.classify_many(cfg, advisories, "bac")
+        # Two entries, not one collapsed onto "".
+        self.assertEqual(len(out), 2)
+        self.assertNotIn("", out)
+        for verdict in out.values():
+            self.assertIn("error", verdict)
+            self.assertIsNone(verdict["is_match"])
+
+    def test_identifier_falls_back_before_giving_up(self):
+        cfg = ai_classifier.AIConfig("anthropic", "https://x", ["tok"], "M")
+        verdict = {"is_match": True, "confidence": 1.0, "vuln_type": "t",
+                   "reason": "r", "cached": False}
+        with mock.patch.object(ai_classifier, "classify_one", return_value=verdict):
+            out = ai_classifier.classify_many(
+                cfg, [{"ghsa_id": "GHSA-x"}, {"cve_id": "CVE-2026-9"}], "bac")
+        self.assertEqual(sorted(out), ["CVE-2026-9", "GHSA-x"])

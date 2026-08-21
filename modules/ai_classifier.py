@@ -653,7 +653,19 @@ def classify_many(
     workers = _classify_workers(cfg, max_workers)
 
     def _job(adv: dict, key_offset: int) -> tuple[str, dict]:
-        gid = adv.get("advisory_id") or ""
+        # Results are keyed by this id. An empty one used to make every such
+        # advisory collapse onto results[""], where the last verdict silently
+        # overwrote the others — i.e. a verdict computed for advisory A could be
+        # presented for advisory B. Fall back through the other identifiers, and
+        # refuse to classify rather than mislabel if none exists.
+        gid = (adv.get("advisory_id") or adv.get("ghsa_id")
+               or adv.get("cve_id") or adv.get("osv_id") or "")
+        if not gid:
+            logger.warning("skipping advisory with no usable identifier")
+            return f"__unidentified_{key_offset}", {
+                "error": "advisory has no identifier to attach a verdict to",
+                "is_match": None, "confidence": 0.0, "cached": False,
+            }
         try:
             return gid, classify_one(cfg, adv, category, token_offset=key_offset)
         except AIError as e:

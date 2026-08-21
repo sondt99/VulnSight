@@ -56,6 +56,14 @@ _MIGRATIONS = [
     # v3: rename ghsa_id -> advisory_id (source-neutral primary key)
     (3, "ALTER TABLE advisories RENAME COLUMN ghsa_id TO advisory_id;"
         "ALTER TABLE ai_classification RENAME COLUMN ghsa_id TO advisory_id"),
+    # v4: v3 renamed the *column* but left the stored JSON alone, so rows written
+    # before it carry no advisory_id inside `data`. Anything that reads a cached
+    # record back — the AI batch in particular — then has no id to key the result
+    # by. Backfill from the primary key, which is authoritative. Idempotent.
+    (4, "UPDATE advisories"
+        "   SET data = json_set(data, '$.advisory_id', advisory_id)"
+        " WHERE json_valid(data)"
+        "   AND COALESCE(json_extract(data, '$.advisory_id'), '') = ''"),
 ]
 
 

@@ -1,0 +1,8 @@
+# Optional: only needed for tests/test_ui_e2e.py, which drives the real UI in a
+# browser. The rest of the suite is offline and needs nothing beyond requirements.txt.
+#
+#   pip install -r requirements-dev.txt
+#   playwright install chromium     # or rely on a system Chrome/Chromium
+#
+# tests/test_ui_e2e.py skips itself when either piece is missing.
+playwright>=1.40

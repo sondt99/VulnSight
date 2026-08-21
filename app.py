@@ -382,6 +382,10 @@ def create_app():
         for gid in advisory_ids:
             rec = cache.get_advisory(gid)
             if rec:
+                # The id we looked it up by is authoritative. Older cache rows
+                # predate the advisory_id field, and without this the verdict
+                # comes back keyed by nothing and is dropped on the floor.
+                rec["advisory_id"] = rec.get("advisory_id") or gid
                 records[gid] = rec
             else:
                 missing.append(gid)

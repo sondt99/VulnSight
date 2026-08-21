@@ -59,7 +59,13 @@ Requirements:
    leaves the browser.
 6. Click **✨ Refine with AI** → each advisory is sent to the LLM which returns
    `is_match / confidence / vuln_type / reason`. Toggle **Only AI matches** to
-   hide the false positives. Verdicts are cached in SQLite so re-runs are free.
+   hide the false positives. Verdicts are cached in SQLite, so re-running the
+   same query is free — but the cache key is a fingerprint of the *whole* request
+   (classifier version, provider, model, system prompt and the rendered advisory
+   prompt). Change the model or edit a class description and every prior verdict
+   for it stops being reusable, by design: a verdict is only valid for the exact
+   question that produced it. Check with
+   `sqlite3 advisories.db "SELECT model, COUNT(*) FROM ai_classification GROUP BY 1"`.
    **Do not skip this for BAC:** umbrella CWEs like `CWE-284` also tag SSRF,
    ReDoS, crypto bugs, and header issues. A live pass of 272 newest BAC-tagged
    advisories dropped 25 that were not access control.
@@ -93,8 +99,9 @@ than one source is tagged e.g. `GHSA+OSV`.
   works for any ecosystem. This is the primary browse engine.
 - **NVD** — NIST CVE API v2. Long published-date searches are split into
   API-compatible 120-day windows, then merged with the other sources by aliases.
-- **OSV.dev** — the OSV bulk export (`{ecosystem}/all.zip`, ~10 MB, cached daily
-  under `osv_cache/`). Filtered by CWE **locally**. Needs a specific ecosystem.
+- **OSV.dev** — the OSV bulk export (`{ecosystem}/all.zip`, cached daily under
+  `osv_cache/`; ~10 MB for maven/go but **~220 MB for npm**). Filtered by CWE
+  **locally**. Needs a specific ecosystem.
 - **OSV native** — source-native records (`GO-`, `RUSTSEC-`, `PYSEC-`, …) that
   carry **no CWE tag** and are therefore invisible to every CWE filter. They are
   keyword-prefiltered by the selected bug class and then **classified by the AI**
@@ -227,6 +234,21 @@ The frontend helpers lifted out of `static/app.js` (CSV escaping, CWE-finder
 ranking, history sanitisation) are tested in `tests/test_frontend_*.js` and run
 inside the Python suite via `tests/test_frontend_js.py` — skipped automatically
 when `node` is unavailable.
+
+`tests/test_ui_e2e.py` drives the real UI in a browser: the CWE finder, the class
+filter, the AI-spend confirmations, stale-verdict handling and the mobile focus
+trap. It is the only part of the suite with a third-party dependency, and it
+**skips itself** unless both pieces are present:
+
+```bash
+pip install -r requirements-dev.txt
+playwright install chromium          # or rely on a system Chrome
+.venv/bin/python -m unittest discover -s tests   # 21 e2e tests join the run
+```
+
+It asserts on *rendered* state (`getComputedStyle(...).display`), never on DOM
+properties — a `display: grid` rule once beat `[hidden]`, so the class filter
+silently stopped filtering while a property-based check stayed green.
 
 ## Notes & limits
 

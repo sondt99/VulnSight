@@ -44,10 +44,13 @@ pass** is for: it reads each advisory and returns a structured verdict
   (`GO-`, `RUSTSEC-`, `PYSEC-`) that carry no CWE tag at all.
 - **Consistent filters** — publish date, package and severity are enforced on
   normalized records from every source; long NVD date ranges are split safely.
-- **SQLite cache** — advisories and AI verdicts persist, so repeat searches are
-  fast and never re-spend AI tokens on an advisory already classified.
+- **SQLite cache** — advisories and AI verdicts persist, so repeating a query is
+  fast and does not re-spend AI tokens. A verdict is keyed by a fingerprint of the
+  whole request, so changing the model or a class definition correctly retires the
+  verdicts that answered the old question.
 - **Export** the filtered list as CSV or JSON.
-- **Offline test suite** — 220+ unit tests, no network or credentials required.
+- **Offline test suite** — 248 unit tests, no network or credentials required,
+  plus 21 optional browser tests that skip themselves without Playwright.
 
 ## Quick start
 
@@ -107,13 +110,17 @@ modules/      core logic: search orchestration, GHSA/OSV clients, CWE map,
 static/       style.css + app.js
 templates/    index.html (page shell)
 tools/        generate_cwe_catalog.py — refresh the MITRE CWE table
-tests/        per-module offline unit tests
+tests/        per-module offline unit tests, plus an optional browser suite
+requirements-dev.txt   Playwright, only for tests/test_ui_e2e.py
 ```
 
 ## Tests
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -v   # full suite, offline
+.venv/bin/python -m unittest discover -s tests -v   # 248 tests, offline
+
+# optional: also run the 21 browser tests (they skip themselves without these)
+pip install -r requirements-dev.txt && playwright install chromium
 ```
 
 ## More

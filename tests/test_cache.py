@@ -8,12 +8,72 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import json
 import tempfile
 import unittest
 
 from modules import cache
 from modules import ghsa_client as ghsa
 from samples import SAMPLE
+
+
+class TestAdvisoryIdBackfill(unittest.TestCase):
+    """v3 renamed the column but left the stored JSON without an advisory_id.
+
+    A record read back without one gives the AI batch nothing to key its verdict
+    by, so verdicts were dropped — or worse, attributed to whichever advisory
+    finished last.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.path = self.tmp.name
+
+    def tearDown(self):
+        os.unlink(self.path)
+
+    def _rows_missing_id(self):
+        with sqlite3.connect(self.path) as conn:
+            return [
+                r[0] for r in conn.execute(
+                    "SELECT advisory_id FROM advisories "
+                    "WHERE COALESCE(json_extract(data, '$.advisory_id'), '') = ''"
+                )
+            ]
+
+    def test_migration_backfills_ids_written_before_v3(self):
+        cache.init_db(self.path)
+        # Simulate a pre-v3 row: the column is set, the JSON is not.
+        with sqlite3.connect(self.path) as conn:
+            conn.execute(
+                "INSERT INTO advisories (advisory_id, cve_id, severity, data, fetched_at)"
+                " VALUES (?,?,?,?,?)",
+                ("GHSA-old-row", "CVE-2026-1", "high",
+                 json.dumps({"ghsa_id": "GHSA-old-row", "summary": "s"}), 0),
+            )
+            conn.execute("DELETE FROM schema_version WHERE version >= 4")
+        self.assertEqual(self._rows_missing_id(), ["GHSA-old-row"])
+
+        cache.init_db(self.path)          # re-run migrations
+        self.assertEqual(self._rows_missing_id(), [])
+        record = cache.get_advisory("GHSA-old-row", self.path)
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertEqual(record["advisory_id"], "GHSA-old-row")
+        self.assertEqual(record["summary"], "s")   # nothing else was disturbed
+
+    def test_migration_is_idempotent_and_leaves_good_rows_alone(self):
+        cache.init_db(self.path)
+        cache.upsert_advisories(
+            [{"advisory_id": "GHSA-good", "cve_id": "CVE-2026-2",
+              "severity": "low", "summary": "keep"}], self.path)
+        for _ in range(3):
+            cache.init_db(self.path)
+        self.assertEqual(self._rows_missing_id(), [])
+        kept = cache.get_advisory("GHSA-good", self.path)
+        assert kept is not None
+        self.assertEqual(kept["summary"], "keep")
 
 
 class TestCache(unittest.TestCase):
