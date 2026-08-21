@@ -10,6 +10,7 @@
 </head>
 <body>
   <a class="skip-link" href="#results">Skip to advisory results</a>
+  <h1 class="sr-only">VulnSight — vulnerability advisory search by bug class and CWE</h1>
 
   <header class="topbar">
     <a class="brand" href="/" aria-label="VulnSight home">
@@ -20,7 +21,7 @@
       </span>
     </a>
 
-    <div class="system-status" aria-label="System status">
+    <div class="system-status" role="group" aria-label="System status">
       <span class="status-title">STATUS</span>
       <span class="pill">
         <span class="dot {{ 'ok' if gh_ok else 'bad' }}" aria-hidden="true"></span>
@@ -58,7 +59,7 @@
           <p>Filter GHSA, NVD and OSV by bug class, ecosystem and package. Optionally confirm matches with AI.</p>
         </div>
         <button class="rail-close" id="filters-close" type="button" aria-label="Close filters">×</button>
-        <div class="rail-stats" aria-label="Available search dimensions">
+        <div class="rail-stats" role="group" aria-label="Available search dimensions">
           <span><b>4</b> sources</span>
           <span><b>{{ categories|length }}</b> classes</span>
           <span><b>{{ cwe_count }}</b> CWEs</span>
@@ -83,14 +84,14 @@
 
         <div class="field cwe-finder">
           <label for="cwe-search">Find a bug <span class="hint">name, alias or CWE ID</span></label>
-          <div class="combo-input">
+          <label class="combo-input" for="cwe-search">
             <span class="combo-icon" aria-hidden="true"></span>
             <input id="cwe-search" type="text" role="combobox" autocomplete="off" spellcheck="false"
                    placeholder="639 · IDOR · sql injection"
                    aria-expanded="false" aria-controls="cwe-options" aria-autocomplete="list"
                    aria-describedby="cwe-search-help">
             <button class="combo-clear" id="cwe-clear" type="button" hidden aria-label="Clear search">×</button>
-          </div>
+          </label>
           <ul class="combo-list" id="cwe-options" role="listbox"
               aria-label="Matching bug classes and CWEs" hidden></ul>
           <p class="hint combo-help" id="cwe-search-help">
@@ -107,14 +108,29 @@
         </div>
 
         <fieldset class="field">
-          <legend class="sr-only">Choose vulnerability classes</legend>
-          <div class="cats taxonomy-list">
-            {% for c in categories %}
-            <label class="cat taxonomy-item">
+          <legend class="field-label" id="classes-legend">
+            Bug classes <span class="hint" id="class-count">{{ categories|length }} available</span>
+          </legend>
+          <div class="class-filter">
+            <label class="sr-only" for="class-search">Filter bug classes</label>
+            <input id="class-search" type="search" autocomplete="off" spellcheck="false"
+                   placeholder="Filter these {{ categories|length }} classes…"
+                   aria-describedby="class-count">
+          </div>
+          <div class="cats taxonomy-list" id="taxonomy-list">
+            {% for g in category_groups %}
+            <p class="taxonomy-group" data-group="{{ g.name }}">{{ g.name }}</p>
+            {% for c in g['items'] %}
+            <label class="cat taxonomy-item" data-key="{{ c.key }}" data-group="{{ g.name }}">
               <input type="checkbox" name="category" value="{{ c.key }}" {{ 'checked' if c.key == 'bac' else '' }}>
-              <span class="cat-copy"><span class="c-label">{{ c.label }}</span><span class="c-desc">{{ c.description }}</span></span>
+              <span class="cat-copy">
+                <span class="c-label">{{ c.label }}</span>
+                <span class="c-desc">{{ c.description }}</span>
+              </span>
             </label>
             {% endfor %}
+            {% endfor %}
+            <p class="taxonomy-empty" id="taxonomy-empty" hidden>No bug class matches that. Try the CWE search above.</p>
           </div>
         </fieldset>
 
@@ -264,7 +280,7 @@
           <h2 id="workspace-title">Advisory queue</h2>
           <p>Merged records from GHSA, NVD and OSV, ranked for triage. Confirm with AI when CWE tags are too broad.</p>
         </div>
-        <div class="threat-key" aria-label="Severity key">
+        <div class="threat-key" role="group" aria-label="Severity key">
           <div class="threat-key-head"><span>Severity</span><span>CVSS</span></div>
           <div class="threat-scale">
             <span class="threat-level critical"><i aria-hidden="true"></i><b>Critical</b><small>9.0–10</small></span>
@@ -272,7 +288,9 @@
             <span class="threat-level medium"><i aria-hidden="true"></i><b>Medium</b><small>4.0–6.9</small></span>
             <span class="threat-level low"><i aria-hidden="true"></i><b>Low</b><small>0.1–3.9</small></span>
           </div>
-          <div class="threat-key-foot"><span>GHSA</span><span>NVD</span><span>OSV</span><span>EPSS</span><span>AI</span></div>
+          <div class="threat-key-foot" role="group" aria-label="Signals shown on each advisory">
+            <span>GHSA</span><span>NVD</span><span>OSV</span><span>EPSS</span><span>AI</span>
+          </div>
         </div>
       </section>
 
@@ -282,6 +300,7 @@
           <div class="summary" id="summary" role="status" aria-live="polite">Select a bug class, then run a search.</div>
         </div>
         <div class="toolbar-actions">
+          <span id="needs-search-hint" class="sr-only">Run a search first</span>
           <button class="ai" id="ai-btn" type="button" disabled title="Ask the AI to score the current results">Refine with AI</button>
           <button id="retry-btn" class="warn-btn" type="button" disabled title="Re-run AI on advisories that errored">Retry failed</button>
           <label class="check match-filter" id="only_match_label" title="Runs AI first if needed, then hides non-matches">
@@ -298,6 +317,8 @@
           </details>
         </div>
       </section>
+
+      <p class="stale-banner" id="stale-banner" role="status" hidden></p>
 
       <section id="results" class="results" aria-label="Advisory results" aria-busy="false">
         <div class="empty empty-onboarding">
@@ -350,6 +371,7 @@
       CLASSES: {{ categories|tojson }},
       OSV_SUPPORTED: {{ osv_supported|tojson }},
       AI_CONFIGURED: {{ ai_configured|tojson }},
+      AI_CALL_BUDGET: {{ ai_call_budget|tojson }},
       AUTH_REQUIRED: {{ auth_required|tojson }},
     };
   </script>

@@ -41,9 +41,12 @@ Requirements:
    `↑`/`↓` to move, `Enter` to add. Picking a **class** ticks its checkbox;
    picking a **CWE** adds a chip. Both appear under **Query targets**. Search is
    local (the catalog is fetched once and cached), so it never round-trips.
-2. **Pick bug classes** in the list below (BAC preselected). Each maps to a CWE
-   set. A single CWE you pick becomes its own ad-hoc class: it is filtered on
-   *and* scored by the AI pass, using that CWE's real MITRE definition.
+2. **Pick bug classes** in the grouped list below (BAC preselected). 29 classes
+   across 7 groups; the **filter box** narrows them by label, description, group
+   or community term (`toctou`, `__proto__`, `md5`, `webshell`). A class you have
+   already selected is never hidden by the filter. Each maps to a CWE set, and a
+   single CWE you pick becomes its own ad-hoc class: it is filtered on *and*
+   scored by the AI pass, using that CWE's real MITRE definition.
 3. **Include extended CWEs** — on = higher recall (more results, more noise),
    off = only high-precision core CWEs. Only affects curated classes; a CWE you
    picked yourself is always used exactly as-is.
@@ -111,19 +114,55 @@ BAC/injection.
 
 ## Bug classes shipped
 
-| Key | Class | Core CWEs |
-|-----|-------|-----------|
-| `bac` | Broken Access Control (BOLA/BFLA/IDOR) | 284, 285, 639, 862, 863, 732, 306, 287 |
-| `sqli` | SQL Injection | 89 |
-| `xss` | Cross-Site Scripting | 79 |
-| `ssti` | SSTI / Code Injection | 1336, 94 |
-| `cmdi` | OS/Command Injection | 77, 78 |
-| `ssrf` | SSRF | 918 |
-| `pathtraversal` | Path Traversal / Upload | 22 |
-| `deserialization` | Insecure Deserialization | 502 |
-| `xxe` | XXE | 611 |
+29 curated classes in 7 groups. Each maps to a **core** CWE set (high precision)
+plus an **extended** set (higher recall), and carries the community terms people
+actually type — so the class list filter matches `__proto__`, `toctou`,
+`samesite`, `md5`, `dll hijack`, `webshell` and friends, not just the label.
+
+| Key | Code | Class | Core CWEs |
+|-----|------|-------|-----------|
+| **Injection** | | | |
+| `sqli` | SQLI | SQL Injection | 89 |
+| `xss` | XSS | Cross-Site Scripting (XSS) | 79 |
+| `ssti` | SSTI | Server-Side Template Injection / Code Injection | 1336, 94 |
+| `cmdi` | CMDI | OS / Command Injection | 77, 78 |
+| `deserialization` | DESER | Insecure Deserialization | 502 |
+| `xxe` | XXE | XML External Entity (XXE) | 611 |
+| `queryinj` | QINJ | LDAP / XPath / XQuery Injection | 643, 90 |
+| `crlf` | CRLF | CRLF / Header Injection & Request Smuggling | 93, 113 |
+| `protopollution` | PROTO | Prototype Pollution | 1321 |
+| **Access control & auth** | | | |
+| `bac` | BAC | Broken Access Control (BAC / BOLA / BFLA / IDOR) | 284, 285, 639, 862, 863, 732, 306, 287 |
+| `csrf` | CSRF | Cross-Site Request Forgery (CSRF) | 352 |
+| `cors` | CORS | CORS / Origin Validation Failure | 942 |
+| `session` | SESS | Session Management Flaws | 384 |
+| `hardcodedcreds` | CREDS | Hard-coded / Default Credentials | 798 |
+| `clickjacking` | CLICK | Clickjacking / UI Redressing | 1021 |
+| **Files & server-side requests** | | | |
+| `ssrf` | SSRF | Server-Side Request Forgery (SSRF) | 918 |
+| `pathtraversal` | PATH | Path Traversal / File Disclosure | 22 |
+| `openredirect` | OPRED | Open Redirect | 601 |
+| `upload` | UPLD | Unrestricted File Upload | 434 |
+| `searchpath` | SPATH | Untrusted Search Path / Library Hijack | 426, 427 |
+| **Crypto & secrets** | | | |
+| `crypto` | CRYPT | Broken Cryptography & Verification | 327, 347, 295 |
+| `randomness` | RAND | Insufficient Randomness | 330, 338 |
+| `infoleak` | INFO | Sensitive Information Disclosure | 200 |
+| **Memory & concurrency** | | | |
+| `memory` | MEM | Memory Safety (OOB / UAF / Double Free) | 787, 125, 416, 415, 476 |
+| `intoverflow` | INT | Integer Overflow / Wraparound | 190 |
+| `race` | RACE | Race Condition / TOCTOU | 362, 367 |
+| **Availability** | | | |
+| `redos` | REDOS | Regular Expression DoS (ReDoS) | 1333 |
+| `dos` | DOS | Denial of Service / Resource Exhaustion | 400, 770 |
+| **Broad / umbrella** | | | |
+| `inputval` | INPUT | Improper Input Validation (umbrella) | 20 |
 
 Add or tune classes in [`modules/cwe_categories.py`](modules/cwe_categories.py).
+`tests/test_cwe_categories.py` enforces the invariants a new class must satisfy:
+a short unique code, a group, a description long enough to serve as the AI
+prompt's definition, a non-empty core set, keyword prefilters, canonical bare
+CWE ids that all exist in the MITRE catalog, and no core/extended overlap.
 
 Anything outside this table is still reachable: pass a **single CWE as its own
 class** with the `cwe:<id>` key. It is filtered on server-side and scored by the

@@ -174,6 +174,57 @@ class TestNormalizeCweId(unittest.TestCase):
 class TestDataIntegrity(unittest.TestCase):
     """The static tables must stay mutually consistent as categories grow."""
 
+    def test_every_category_is_completely_specified(self):
+        """A half-filled class silently degrades search and the AI prompt."""
+        for key, cat in cwe.CATEGORIES.items():
+            with self.subTest(category=key):
+                self.assertTrue(cat.get("code"), "missing code")
+                self.assertTrue(cat.get("group"), "missing group")
+                self.assertTrue(cat.get("label"), "missing label")
+                # The description is injected into the AI prompt as the class
+                # definition; a stub makes the verdict meaningless.
+                self.assertGreaterEqual(len(cat.get("description", "")), 40)
+                self.assertTrue(cat.get("core"), "core CWE set may not be empty")
+                self.assertIn(key, cwe.KEYWORDS,
+                              "no keyword prefilter -> OSV-native finds nothing")
+                self.assertTrue(cwe.KEYWORDS[key])
+
+    def test_no_cwe_is_both_core_and_extended(self):
+        for key, cat in cwe.CATEGORIES.items():
+            overlap = set(cat["core"]) & set(cat["extended"])
+            with self.subTest(category=key):
+                self.assertEqual(overlap, set(), f"CWE {overlap} listed twice")
+
+    def test_no_duplicate_cwe_within_a_bucket(self):
+        for key, cat in cwe.CATEGORIES.items():
+            for bucket in ("core", "extended"):
+                ids = cat[bucket]
+                with self.subTest(category=key, bucket=bucket):
+                    self.assertEqual(len(ids), len(set(ids)))
+
+    def test_cwe_ids_are_canonical_bare_numbers(self):
+        for key, cat in cwe.CATEGORIES.items():
+            for cwe_id in cat["core"] + cat["extended"]:
+                with self.subTest(category=key, cwe=cwe_id):
+                    self.assertRegex(cwe_id, r"^[1-9][0-9]*$")
+                    self.assertEqual(cwe_id, cwe.normalize_cwe_id(cwe_id))
+
+    def test_keywords_are_lowercase_and_deduplicated(self):
+        for key, words in cwe.KEYWORDS.items():
+            with self.subTest(category=key):
+                self.assertEqual(words, [w.lower() for w in words])
+                self.assertEqual(len(words), len(set(words)))
+                self.assertTrue(all(w.strip() for w in words))
+
+    def test_every_category_resolves_to_at_least_one_cwe(self):
+        for key in cwe.CATEGORIES:
+            with self.subTest(category=key):
+                self.assertTrue(cwe.resolve_cwes([key], include_extended=False))
+
+    def test_class_labels_are_unique(self):
+        labels = [c["label"] for c in cwe.CATEGORIES.values()]
+        self.assertEqual(len(labels), len(set(labels)))
+
     def test_every_category_has_a_short_unique_code(self):
         """The UI renders these in a fixed-width column; long codes eat the name."""
         codes = [cat["code"] for cat in cwe.CATEGORIES.values()]

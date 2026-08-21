@@ -22,6 +22,7 @@ from modules import ghsa_client as ghsa
 from modules.cwe_categories import (
     CATEGORIES,
     CWE_VERSION,
+    KEYWORDS,
     ECOSYSTEMS,
     POPULAR_PACKAGES,
     SEVERITIES,
@@ -34,6 +35,11 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 MAX_AI_BATCH = 100
+
+# One classify request fans out to len(categories) × len(advisory_ids) model
+# calls. Capping the product keeps a single request from turning into thousands
+# of paid calls; the UI sizes its batches from the same number.
+MAX_AI_CALLS_PER_REQUEST = 500
 
 
 @functools.lru_cache(maxsize=1)
@@ -178,8 +184,13 @@ def create_app():
             {
                 "key": k,
                 "code": v["code"],
+                "group": v["group"],
                 "label": v["label"],
                 "description": v["description"],
+                # The community terms people actually type ("__proto__",
+                # "toctou", "samesite", "md5"); searchable, and the first few
+                # are shown as aliases in the picker.
+                "terms": KEYWORDS.get(k, []),
                 # The CWE finder needs these to flag which CWEs a class already
                 # covers, so picking one is an informed choice rather than a
                 # redundant extra AI pass, and to size the NVD cost estimate.
@@ -188,14 +199,30 @@ def create_app():
             }
             for k, v in CATEGORIES.items()
         ]
+        # 29 classes is too many for a flat list, so the picker renders them
+        # under their group headings in declaration order.
+        groups: list[dict] = []
+        for category in categories:
+            name = category["group"]
+            if not groups or groups[-1]["name"] != name:
+                existing = next((g for g in groups if g["name"] == name), None)
+                if existing is None:
+                    groups.append({"name": name, "items": [category]})
+                    continue
+                existing["items"].append(category)
+            else:
+                groups[-1]["items"].append(category)
+
         ai_cfg = ai_classifier.load_config()
         return render_template(
             "index.html",
             categories=categories,
+            category_groups=groups,
             ecosystems=ECOSYSTEMS,
             severities=SEVERITIES,
             cwe_version=CWE_VERSION,
             cwe_count=len(_cwe_payload()["rows"]),
+            ai_call_budget=MAX_AI_CALLS_PER_REQUEST,
             popular_packages=POPULAR_PACKAGES,
             osv_supported=list(osv_client.ECOSYSTEM_MAP.keys()),
             ai_configured=ai_cfg.configured,
@@ -339,6 +366,16 @@ def create_app():
             }), 400
         if any(len(gid) > 128 for gid in advisory_ids):
             return jsonify({"error": "Advisory identifiers may not exceed 128 characters."}), 400
+        planned_calls = len(categories) * len(advisory_ids)
+        if planned_calls > MAX_AI_CALLS_PER_REQUEST:
+            return jsonify({
+                "error": (
+                    f"Request would issue {planned_calls} AI calls "
+                    f"({len(categories)} categories × {len(advisory_ids)} advisories); "
+                    f"the per-request limit is {MAX_AI_CALLS_PER_REQUEST}. "
+                    "Send fewer advisories per request or select fewer categories."
+                )
+            }), 400
 
         records: dict[str, dict] = {}
         missing: list[str] = []

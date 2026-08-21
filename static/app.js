@@ -1,9 +1,16 @@
 // === Configuration & State ===
-const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window.BOOT;
+const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AI_CALL_BUDGET, AUTH_REQUIRED } = window.BOOT;
     const $ = (s) => document.querySelector(s);
     const $$ = (s) => Array.from(document.querySelectorAll(s));
     let LAST = [];           // last result set (normalized advisories)
     let AI = {};             // advisory_id -> verdict
+    // The sorted category list `AI` was scored against. A verdict for "bac" says
+    // nothing about "sqli", so the queue must not be filtered or exported as if
+    // it did once the selection moves on.
+    let AI_CATS = null;
+    // Facts about the last successful search, so the summary can be re-rendered
+    // whenever the visible set changes instead of going stale after one write.
+    let SEARCH_META = null;
     let filterReturnFocus = null;
 
     // === DOM Helpers ===
@@ -11,17 +18,75 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
       $('#results').setAttribute('aria-busy', String(Boolean(busy)));
     }
 
+    // Below this width the rail is a modal slide-over, not a static sidebar.
+    const MODAL_PANEL_WIDTH = 900;
+
     function setFilterPanel(open, restoreFocus = true) {
       const isOpen = Boolean(open);
+      const modal = window.innerWidth <= MODAL_PANEL_WIDTH;
+      const rail = $('#control-panel');
       if (isOpen) filterReturnFocus = document.activeElement;
       document.body.classList.toggle('filters-open', isOpen);
       $('#filters-toggle').setAttribute('aria-expanded', String(isOpen));
-      $('#filter-scrim').tabIndex = isOpen ? 0 : -1;
+      // The scrim sits *behind* the panel; focusing it stranded keyboard users
+      // outside the dialog. Escape and the × button are the accessible exits.
+      $('#filter-scrim').tabIndex = -1;
+
+      // The panel is visually modal (scrim + locked body scroll), so make it
+      // modal for assistive tech too and stop Tab from wandering behind it.
+      if (isOpen && modal) {
+        rail.setAttribute('role', 'dialog');
+        rail.setAttribute('aria-modal', 'true');
+      } else {
+        rail.removeAttribute('role');
+        rail.removeAttribute('aria-modal');
+      }
+      [$('.topbar'), $('#workspace')].forEach(el => {
+        if (el) el.inert = isOpen && modal;
+      });
+
       if (isOpen) {
-        requestAnimationFrame(() => $('#filters-close').focus());
+        focusWhenVisible(rail, $('#filters-close'));
       } else if (restoreFocus && filterReturnFocus && document.contains(filterReturnFocus)) {
         filterReturnFocus.focus();
       }
+    }
+
+    const FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]),'
+      + 'select:not([disabled]),summary,[tabindex]:not([tabindex="-1"])';
+
+    // `inert` keeps focus out of the background but nothing brings it back from
+    // the end of the document, so wrap Tab inside the open panel.
+    function trapPanelTab(e) {
+      if (e.key !== 'Tab') return;
+      if (!document.body.classList.contains('filters-open')) return;
+      if (window.innerWidth > MODAL_PANEL_WIDTH) return;
+      const items = Array.from($('#control-panel').querySelectorAll(FOCUSABLE))
+        .filter(el => el.offsetParent !== null);
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+
+    // `visibility` is part of the panel's transition, so on the next frame the
+    // target is still visibility:hidden and .focus() silently does nothing.
+    function focusWhenVisible(transitioningEl, target) {
+      let done = false;
+      const attempt = () => {
+        if (done || !target) return;
+        done = true;
+        transitioningEl.removeEventListener('transitionend', attempt);
+        target.focus();
+      };
+      transitioningEl.addEventListener('transitionend', attempt);
+      setTimeout(attempt, 400);   // fallback if the transition never fires
     }
 
 
@@ -78,7 +143,18 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
 
     function applyState(state) {
       if (!state) return;
-      const categories = sanitizeCategories(state.categories);
+      let categories = sanitizeCategories(state.categories);
+      // Syntax alone is not enough: a stored "cwe:9999999" would restore as a
+      // chip and only fail later, server-side. Drop what MITRE does not define
+      // (checked only once the catalog has actually loaded).
+      if (ENTRIES.some(entry => entry.kind === 'cwe')) {
+        const known = new Set(ENTRIES.filter(e => e.kind === 'cwe').map(e => e.key));
+        const dropped = categories.filter(k => k.indexOf('cwe:') === 0 && !known.has(k));
+        if (dropped.length) {
+          categories = categories.filter(k => dropped.indexOf(k) === -1);
+          toast('Skipped unknown ' + dropped.join(', ') + ' from that saved search', 'err');
+        }
+      }
       PICKED.clear();
       categories.forEach(key => {
         if (key.indexOf('cwe:') === 0) PICKED.add(key.slice(4));
@@ -97,8 +173,12 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
       const sources = (state.sources || []).filter(
         s => $$('input[name=source]').some(box => box.value === s));
       setSources(sources.length ? sources : ['ghsa']);
-      // Never replay a forced 10 MB OSV re-download from a history click.
-      $('#refresh_osv').checked = false;
+      // Never replay a forced 10 MB OSV re-download from a history click — but
+      // say so, rather than silently unticking a box the user just ticked.
+      if ($('#refresh_osv').checked) {
+        $('#refresh_osv').checked = false;
+        toast('“Force-refresh OSV cache” left off for this replay', 'ok');
+      }
       renderSelection();
     }
 
@@ -111,9 +191,41 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
         && (known.has(v) || /^cwe:[1-9][0-9]{0,6}$/.test(v)));
     }
 
+    // === Bug-class filter ===
+    // With 29 classes the browsable list needs narrowing. A selected class is
+    // never hidden: it is part of the query, so it must stay visible and
+    // un-tickable-by-accident even when it does not match the filter.
+    function filterClasses() {
+      const query = $('#class-search').value.trim().toLowerCase();
+      const tokens = query.split(/\s+/).filter(Boolean);
+      const items = $$('#taxonomy-list .taxonomy-item');
+      let shown = 0;
+      items.forEach(item => {
+        const checked = item.querySelector('input').checked;
+        const hay = CLASS_HAY[item.dataset.key] || '';
+        const match = !tokens.length || tokens.every(t => hay.includes(t));
+        const visible = match || checked;
+        item.hidden = !visible;
+        item.classList.toggle('filtered-keep', visible && !match);
+        if (visible) shown++;
+      });
+      // Hide a group heading once everything under it is filtered out.
+      $$('#taxonomy-list .taxonomy-group').forEach(heading => {
+        const group = heading.dataset.group;
+        heading.hidden = !items.some(
+          item => !item.hidden && item.dataset.group === group);
+      });
+      $('#taxonomy-empty').hidden = shown > 0;
+      const total = items.length;
+      $('#class-count').textContent = query
+        ? `${shown} of ${total} shown`
+        : `${total} available`;
+    }
+
     // === Recent searches ===
     const HISTORY_KEY = 'vulnsight_history';
     const HISTORY_MAX = 12;
+    let CURRENT_SIG = null;   // signature of the search currently on screen
 
     function loadHistory() {
       try {
@@ -166,6 +278,18 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
       return parts.join(' · ');
     }
 
+    // The signature dedupes on sources / max results / sort as well, so two rows
+    // could look identical and restore different queries. Surface those here.
+    function historyDetail(state) {
+      const parts = [(state.sources || []).map(s => s.toUpperCase()).join('+') || 'no source'];
+      parts.push('max ' + (state.max_results || 100));
+      if (state.sort && state.sort !== 'published') parts.push(state.sort.replace(/_/g, ' '));
+      if (state.direction === 'asc') parts.push('oldest first');
+      if (state.type && state.type !== 'reviewed') parts.push(state.type);
+      if (state.include_extended === false) parts.push('core CWEs only');
+      return parts.join(' · ');
+    }
+
     function recordHistory(state, count) {
       const sig = stateSignature(state);
       const list = loadHistory().filter(e => e.sig !== sig);
@@ -176,6 +300,19 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
         label: historyLabel(state),
         query: state,
       });
+      saveHistory(list);
+      CURRENT_SIG = sig;
+      renderHistory();
+    }
+
+    // A row that says "100 hits" when the user remembers "7 confirmed" is not
+    // the search they are looking for, so record the AI outcome too.
+    function recordHistoryMatches(matches) {
+      if (!CURRENT_SIG) return;
+      const list = loadHistory();
+      const entry = list.find(e => e.sig === CURRENT_SIG);
+      if (!entry) return;
+      entry.matches = matches;
       saveHistory(list);
       renderHistory();
     }
@@ -198,19 +335,28 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
       const list = loadHistory();
       const section = $('#history-section');
       section.hidden = list.length === 0;
-      $('#history-list').innerHTML = list.map((entry, index) => {
+      $('#history-list').innerHTML = list.map(entry => {
         const count = Number(entry.count) || 0;
+        // Recomputed from the stored query, so entries written by an older
+        // build gain the detail line too.
+        const label = entry.query ? historyLabel(entry.query) : (entry.label || '');
+        const detail = entry.query ? historyDetail(entry.query) : '';
+        const matches = Number.isFinite(Number(entry.matches))
+          ? ` · <span class="history-matches">${Number(entry.matches)} confirmed</span>` : '';
+        // Keyed by signature, not array index: two tabs share this storage and a
+        // stale index would restore — or delete — the wrong row.
         return `<li class="history-item">
-          <button type="button" class="history-run" data-index="${index}"
-              title="${safeAttr(entry.label || '')} — click to restore and search again">
-            <span class="history-label">${esc(entry.label || '')}</span>
+          <button type="button" class="history-run" data-sig="${safeAttr(entry.sig)}"
+              title="${safeAttr(label + (detail ? ' — ' + detail : ''))} — click to restore and search again">
+            <span class="history-label">${esc(label)}</span>
             <span class="history-meta">
-              <span class="history-count">${count} hit${count === 1 ? '' : 's'}</span>
+              <span class="history-count">${count} hit${count === 1 ? '' : 's'}</span>${matches}
+              <span class="history-detail">${esc(detail)}</span>
               <span class="history-when">${esc(relativeTime(entry.at))}</span>
             </span>
           </button>
-          <button type="button" class="history-drop" data-index="${index}"
-              aria-label="Forget ${safeAttr(entry.label || 'this search')}">×</button>
+          <button type="button" class="history-drop" data-sig="${safeAttr(entry.sig)}"
+              aria-label="Forget ${safeAttr(label || 'this search')}">×</button>
         </li>`;
       }).join('');
     }
@@ -229,6 +375,16 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
 
     CLASSES.forEach(c => { c.cwes = (c.core || []).concat(c.extended || []); });
 
+    // Everything a class can be matched on, computed once. Single source of
+    // truth for both the finder and the class-list filter — it used to be
+    // duplicated into a data-haystack attribute on every row.
+    function classHaystack(c) {
+      return (c.key + ' ' + c.code + ' ' + c.label + ' ' + (c.description || '')
+        + ' ' + c.group + ' ' + (c.terms || []).join(' ')).toLowerCase();
+    }
+    const CLASS_HAY = {};
+    CLASSES.forEach(c => { CLASS_HAY[c.key] = classHaystack(c); });
+
     // CWE id -> the curated classes that already cover it.
     const CLASS_BY_CWE = {};
     CLASSES.forEach(c => c.cwes.forEach(id => {
@@ -244,8 +400,10 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
         code: c.code || c.key.toUpperCase(),
         label: c.label,
         note: (c.cwes || []).length + ' CWEs',
-        aliases: [],
-        hay: (c.key + ' ' + c.label + ' ' + (c.description || '')).toLowerCase(),
+        // The community terms are what people type ("__proto__", "toctou"),
+        // so they must be searchable and worth showing.
+        aliases: (c.terms || []).slice(0, 4),
+        hay: CLASS_HAY[c.key],
       }));
     }
 
@@ -349,15 +507,18 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
         ? `<span class="combo-alias" title="${safeAttr(aliasText)}">${esc(entry.aliases.slice(0, 3).join(' · '))}</span>` : '';
       const sub = aliases || covered
         ? `<span class="combo-sub">${aliases}${covered}</span>` : '';
-      return `<li class="combo-option ${entry.kind}${isPicked(entry) ? ' picked' : ''}"
+      // "Already added" was conveyed only by opacity and a CSS checkmark, and
+      // aria-selected="false" told assistive tech the opposite.
+      const picked = isPicked(entry);
+      return `<li class="combo-option ${entry.kind}${picked ? ' picked' : ''}"
           role="option" id="cwe-option-${index}" data-key="${safeAttr(entry.key)}"
-          aria-selected="${index === comboActive}">
+          aria-selected="${index === comboActive}"${picked ? ' aria-disabled="true"' : ''}>
         <span class="combo-head">
           <span class="combo-code">${esc(entry.code)}</span>
           <span class="combo-label" title="${safeAttr(entry.label)}">${esc(entry.label)}</span>
           <span class="combo-note">${esc(entry.note)}</span>
         </span>
-        ${sub}
+        ${sub}${picked ? '<span class="sr-only">already added</span>' : ''}
       </li>`;
     }
 
@@ -470,6 +631,8 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
         ? `${total} selected · ${total} AI pass${total > 1 ? 'es' : ''} per advisory`
         : '';
       updateNvdHint();
+      // Changing the selection can invalidate verdicts already on screen.
+      updateActionButtons();
     }
 
     // NVD costs one rate-limited request per CWE, so make that cost visible
@@ -583,13 +746,24 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
       let aiHtml = '';
       if (v) {
         if (v.error) {
-          aiHtml = `<div class="ai-verdict error">
-            <div class="verdict-head"><span class="verdict-state">AI error</span></div>
-            <div class="desc">${esc(v.error)}</div>
+          // Quota/rate-limit answers are the common case and the raw upstream
+          // string does not tell the user what to do about it.
+          const quota = /429|quota|rate.?limit|too many/i.test(v.error);
+          const advice = quota
+            ? 'The AI provider is rate-limiting or out of quota — wait a moment, then retry.'
+            : esc(v.error);
+          aiHtml = `<div class="ai-verdict error" role="alert">
+            <div class="verdict-head">
+              <span class="verdict-state">AI error</span>
+              <button type="button" class="verdict-retry" data-retry="${safeAttr(a.advisory_id)}">Retry</button>
+            </div>
+            <div class="desc">${advice}</div>
           </div>`;
         } else {
           const incomplete = v.has_errors && v.is_match !== true;
-          const cls = v.is_match ? 'match' : (incomplete ? '' : 'nomatch');
+          // 'partial' used to be an empty class, leaving the one state that
+          // means "scoring failed halfway" as the only one with no colour.
+          const cls = v.is_match ? 'match' : (incomplete ? 'partial' : 'nomatch');
           const state = v.is_match ? 'Confirmed match' : (incomplete ? 'Incomplete score' : 'Not a match');
           const pct = Math.round((v.confidence||0)*100);
           aiHtml = `<div class="ai-verdict ${cls}">
@@ -603,13 +777,23 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
           </div>`;
         }
       }
+      // The CWE *is* the taxonomy this tool searches by, so show the id and the
+      // name inline; the name used to live only in a title, unreachable by
+      // touch and by keyboard.
       const cwes = (a.cwe_labels||[]).map(c =>
-        `<span class="badge cwe" title="${esc(c.label)}">${esc(c.id)}</span>`).join('');
-      const pkgs = (a.packages||[]).slice(0,4).map(p =>
-        `<span class="badge pkg">${esc(p.ecosystem)}:${esc(p.name)}${p.first_patched_version?' → '+esc(p.first_patched_version):''}</span>`).join('');
+        `<span class="badge cwe" title="CWE-${esc(c.id)}: ${esc(c.label)}">CWE-${esc(c.id)}<small>${esc(c.label)}</small></span>`).join('');
+      const ecoNames = (a.ecosystems||[]).filter(Boolean);
+      // Package badges repeat the ecosystem the eco badge already states.
+      const pkgs = (a.packages||[]).slice(0,4).map(p => {
+        const name = ecoNames.length === 1 && p.ecosystem === ecoNames[0]
+          ? esc(p.name) : `${esc(p.ecosystem)}:${esc(p.name)}`;
+        return `<span class="badge pkg" title="${safeAttr(p.ecosystem + ':' + p.name)}">${name}${p.first_patched_version?' → '+esc(p.first_patched_version):''}</span>`;
+      }).join('');
       const morePkgs = (a.packages||[]).length > 4 ? `<span class="badge">+${a.packages.length-4} more</span>` : '';
       const cve = a.cve_id ? `<a href="https://nvd.nist.gov/vuln/detail/${encodeURIComponent(a.cve_id)}" target="_blank" rel="noopener noreferrer">${esc(a.cve_id)}</a>` : '<span class="muted">no CVE</span>';
-      const dimClass = ($('#only_match').checked && v && v.is_match === false) ? 'dim' : '';
+      // A withdrawn advisory is not actionable — de-emphasise it the way
+      // non-matches already are.
+      const dimClass = a.withdrawn_at ? 'dim' : '';
       const safeSeverity = ['critical','high','medium','low','unknown'].includes(a.severity) ? a.severity : 'unknown';
       const sevbar = 'sevbar-' + safeSeverity;
       const srcs = a.sources || [a.source].filter(Boolean);
@@ -619,18 +803,19 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
       const nativeBadge = (a.native && !(a.cwes||[]).length)
         ? `<span class="badge badge--native" title="Native OSV record with no CWE — relies on AI">NO CWE · AI</span>` : '';
       const withdrawnBadge = a.withdrawn_at
-        ? `<span class="badge badge--withdrawn" title="Withdrawn at ${esc(a.withdrawn_at)}">WITHDRAWN</span>` : '';
+        ? `<span class="badge badge--withdrawn">WITHDRAWN ${esc(String(a.withdrawn_at).slice(0,10))}</span>` : '';
       const kevBadge = a.kev
         ? `<span class="badge badge--kev" title="CISA Known Exploited Vulnerability">KEV / EXPLOITED</span>` : '';
-      const epssPct = Number(a.epss_percentage);
-      const epssBar = Number.isFinite(epssPct)
-        ? `<span class="badge badge--epss" title="EPSS exploit probability">EPSS ${(epssPct * 100).toFixed(2)}%</span>`
-        : '';
-      const epssMeta = Number.isFinite(epssPct)
-        ? `<span class="epss-meter" title="EPSS exploit probability${Number.isFinite(Number(a.epss_percentile)) ? ' · percentile ' + Math.round(Number(a.epss_percentile) * 100) : ''}">
+      // Number(null) is 0 and finite, which used to render "no EPSS data" as a
+      // measured 0.00% exploit probability — a fabricated fact in a triage tool.
+      const hasEpss = a.epss_percentage != null && Number.isFinite(Number(a.epss_percentage));
+      const epssPct = hasEpss ? Number(a.epss_percentage) : NaN;
+      const hasPercentile = a.epss_percentile != null && Number.isFinite(Number(a.epss_percentile));
+      const epssMeta = hasEpss
+        ? `<span class="epss-meter" title="EPSS exploit probability${hasPercentile ? ' · percentile ' + Math.round(Number(a.epss_percentile) * 100) : ''}">
             <span class="meta-label">EPSS</span>
             <progress max="100" value="${Math.min(100, Math.max(0, epssPct * 100))}" aria-label="EPSS ${(epssPct * 100).toFixed(2)}%"></progress>
-            ${(epssPct * 100).toFixed(2)}%${Number.isFinite(Number(a.epss_percentile)) ? ' · p' + Math.round(Number(a.epss_percentile) * 100) : ''}
+            ${(epssPct * 100).toFixed(2)}%${hasPercentile ? ' · p' + Math.round(Number(a.epss_percentile) * 100) : ''}
           </span>`
         : '';
       return `<article class="card ${sevbar} ${dimClass}" data-id="${esc(a.advisory_id)}">
@@ -639,8 +824,8 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
           <span class="badge sev ${safeSeverity}">${esc(a.severity)}</span>
         </div>
         <div class="badges">
-          ${srcBadge}${nativeBadge}${kevBadge}${withdrawnBadge}${epssBar}
-          <span class="badge eco">${esc((a.ecosystems||[]).join(', ')||'—')}</span>
+          ${srcBadge}${nativeBadge}${kevBadge}${withdrawnBadge}
+          ${ecoNames.length ? `<span class="badge eco">${esc(ecoNames.join(', '))}</span>` : ''}
           ${cwes}
         </div>
         <div class="badges">${pkgs}${morePkgs}</div>
@@ -690,28 +875,109 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
       return items;
     }
 
+    // Only rows that still need work. A partial verdict that already resolved to
+    // a match is done — counting it made "Retry failed" re-bill finished rows.
     function failedIds() {
-      return LAST.map(a => a.advisory_id).filter(id => AI[id] && (AI[id].error || AI[id].has_errors));
+      return LAST.map(a => a.advisory_id).filter(id => {
+        const v = AI[id];
+        return v && (v.error || (v.has_errors && v.is_match !== true));
+      });
+    }
+
+    // True when verdicts on screen were scored for a different selection than
+    // the one now active — they describe another question's answer.
+    function verdictsAreStale() {
+      if (!AI_CATS || !Object.keys(AI).length) return false;
+      const now = selectedCategories().slice().sort();
+      return now.length !== AI_CATS.length
+        || now.some((c, i) => c !== AI_CATS[i]);
+    }
+
+    function classLabelFor(key) {
+      if (key.indexOf('cwe:') === 0) return 'CWE-' + key.slice(4);
+      const cls = CLASSES.find(c => c.key === key);
+      return cls ? shortClassLabel(cls.label) : key;
+    }
+
+    function renderStaleBanner() {
+      const banner = $('#stale-banner');
+      const stale = verdictsAreStale();
+      banner.hidden = !stale;
+      if (stale) {
+        banner.textContent = 'AI verdicts below were scored for '
+          + AI_CATS.map(classLabelFor).join(' + ')
+          + ', not the current selection. Re-run “Refine with AI” before trusting or exporting them.';
+      }
+      return stale;
     }
 
     function updateActionButtons() {
       const has = LAST.length > 0;
+      const stale = renderStaleBanner();
       $('#ai-btn').disabled = !has;
-      $('#only_match').disabled = !has;
+      // Filtering on verdicts that answer a different question would silently
+      // hide the wrong advisories, so the filter is blocked until re-scored.
+      $('#only_match').disabled = !has || stale;
+      if (stale && $('#only_match').checked) $('#only_match').checked = false;
+      $('#only_match_label').title = stale
+        ? 'Verdicts are stale — re-run “Refine with AI” first'
+        : 'Runs AI first if needed, then hides non-matches';
+      // Stay focusable while disabled: tabIndex -1 removed the control from the
+      // tab order entirely, so its aria-disabled was never announced.
       $('#export-btn').setAttribute('aria-disabled', String(!has));
-      $('#export-btn').tabIndex = has ? 0 : -1;
+      $('#export-btn').tabIndex = 0;
       if (!has) $('.export-menu').removeAttribute('open');
+      // Say *why* a control is unavailable, not just what it would have done.
+      [$('#ai-btn'), $('#retry-btn'), $('#export-btn'), $('#only_match')].forEach(el => {
+        if (!el) return;
+        if (has) el.removeAttribute('aria-describedby');
+        else el.setAttribute('aria-describedby', 'needs-search-hint');
+      });
       const nfail = failedIds().length;
       const rb = $('#retry-btn');
       rb.disabled = nfail === 0;
       rb.textContent = nfail ? `Retry failed (${nfail})` : 'Retry failed';
     }
 
+    // The summary used to be written once per search and then contradict the
+    // screen as soon as a filter hid anything.
+    function renderSummary(shown) {
+      const m = SEARCH_META;
+      if (!m) return;
+      const ps = Object.entries(m.perSource);
+      const psText = ps.length
+        ? ' · ' + ps.map(([k, v]) => `${k.toUpperCase()}:${v}`).join(' + ') : '';
+      const head = shown === m.count
+        ? `<b>${m.count}</b> advisories`
+        : `<b>${shown}</b> of ${m.count} shown`;
+      // "Hidden" and "never scored" look identical once the filter is on, which
+      // reads as "the AI cleared these" when the AI never saw them.
+      const unscored = $('#only_match').checked ? unscoredCount() : 0;
+      const unscoredNote = unscored
+        ? ` · <span class="summary-unscored" title="These were never scored, so they are hidden rather than cleared">${unscored} not scored</span>`
+        : '';
+      // A full page is very likely a truncated one; saying so prevents reading
+      // "0 hits for CWE-639" as "this CWE has no advisories".
+      const capped = m.count >= m.maxResults
+        ? ` · <span class="summary-capped" title="Raise “Max results” to widen the query">capped at ${m.maxResults}</span>`
+        : '';
+      const shownCwes = m.cwes.slice(0, 6).join(', ');
+      const more = m.cwes.length > 6 ? `<span title="${safeAttr(m.cwes.join(', '))}"> +${m.cwes.length - 6} more</span>` : '';
+      $('#summary').innerHTML = head + unscoredNote + psText + capped
+        + ` · CWEs: <code>${esc(shownCwes)}</code>${more}`
+        + (m.cached ? ` · <span class="summary-cached">${m.cached} already AI-scored</span>` : '');
+    }
+
     function render() {
       const items = currentItems();
       const el = $('#results');
+      renderSummary(items.length);
       if (!items.length) {
-        el.innerHTML = `<div class="empty">No advisories match the current filter.</div>`;
+        // Distinguish "the query found nothing" from "your filter hid it all".
+        const filtered = LAST.length > 0;
+        el.innerHTML = `<div class="empty">${filtered
+          ? 'All ' + LAST.length + ' advisories are hidden by the “Confirmed only” filter.'
+          : 'No advisories matched this query.'}</div>`;
         updateActionButtons();
         return;
       }
@@ -719,25 +985,26 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
       updateActionButtons();
     }
 
-    async function search() {
-      const state = formState();
-      if (!state.categories.length) { toast('Select a bug class or a CWE', 'err'); return; }
+    // `overrides` lets the Auto pipeline run with its own source set without
+    // rewriting the checkboxes the user deliberately ticked.
+    async function search(overrides) {
+      const state = Object.assign(formState(), overrides || {});
+      // Validate everything *before* touching the results pane: bailing out
+      // afterwards used to leave a spinner up forever while Export and the AI
+      // pass kept operating on the previous, now-invisible result set.
+      if (!state.categories.length) { toast('Select a bug class or a CWE', 'err'); return false; }
+      if (!state.sources.length) { toast('Select at least one data source', 'err'); return false; }
+      const sources = state.sources;
       if (document.body.classList.contains('filters-open')) setFilterPanel(false, false);
       $('#search-btn').disabled = true;
       setResultsBusy(true);
       $('#results').innerHTML = `<div class="loading"><span class="spinner"></span>Searching advisories…</div>`;
       $('#summary').textContent = 'Searching…';
-      const sources = state.sources;
-      if (!sources.length) {
-        toast('Select at least one data source', 'err');
-        $('#search-btn').disabled = false;
-        setResultsBusy(false);
-        return;
-      }
       // A failed query must never leave the previous result set available to
       // the Auto pipeline or export controls as if it were fresh data.
       LAST = [];
       AI = {};
+      AI_CATS = null;
       updateActionButtons();
       const payload = Object.assign({}, state, {
         published: publishedWindow(state.published),
@@ -754,20 +1021,29 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
         AI = {};
         LAST.forEach(a => { if (a.ai) AI[a.advisory_id] = a.ai; });
         const cached = LAST.filter(a => a.ai).length;
-        const ps = data.query.per_source || {};
-        const psText = Object.keys(ps).length ? ' · ' + Object.entries(ps).map(([k,v]) => `${k.toUpperCase()}:${v}`).join(' + ') : '';
-        $('#summary').innerHTML = `<b>${data.count}</b> advisories${psText} · CWEs: <code>${data.query.cwes.join(', ')}</code>`
-          + (cached ? ` · <span class="summary-cached">${cached} already AI-scored</span>` : '');
+        // The server only attaches cached verdicts when every requested
+        // category has one, so they belong to exactly this selection.
+        AI_CATS = cached ? state.categories.slice().sort() : null;
+        SEARCH_META = {
+          count: data.count,
+          perSource: data.query.per_source || {},
+          cwes: data.query.cwes || [],
+          maxResults: state.max_results,
+          cached: cached,
+        };
         (data.warnings || []).forEach(w => toast('⚠️ ' + w, 'err'));
         $('#ai-btn').disabled = LAST.length === 0;
         $('#only_match').disabled = LAST.length === 0;
         $('#only_match').checked = false;
         recordHistory(state, data.count);
         render();
+        return true;
       } catch (e) {
+        SEARCH_META = null;
         $('#results').innerHTML = `<div class="empty">❌ ${esc(e.message)}</div>`;
         $('#summary').textContent = 'Error.';
         toast(e.message, 'err');
+        return false;
       } finally {
         $('#search-btn').disabled = false;
         setResultsBusy(false);
@@ -780,24 +1056,39 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
     async function classifyIds(ids) {
       if (!ids.length) return 0;
       const cats = selectedCategories();
-      for (let offset = 0; offset < ids.length; offset += 100) {
-        const batch = ids.slice(offset, offset + 100);
+      const sent = cats.length ? cats : ['bac'];
+      // Each request costs categories × advisories model calls, and the server
+      // rejects anything over AI_CALL_BUDGET. Size the batch to stay under it.
+      const budget = Number(AI_CALL_BUDGET) || 500;
+      const batchSize = Math.max(1, Math.min(100, Math.floor(budget / sent.length)));
+      for (let offset = 0; offset < ids.length; offset += batchSize) {
+        const batch = ids.slice(offset, offset + batchSize);
         const data = await apiPost('/api/ai/classify', {
-          categories: cats.length ? cats : ['bac'],
+          categories: sent,
           advisory_ids: batch,
         });
         Object.assign(AI, data.verdicts);
+        AI_CATS = sent.slice().sort();
       }
       return ids.filter(id => AI[id] && (AI[id].error || AI[id].has_errors)).length;
     }
 
+    // Estimated model calls for scoring `count` advisories with the current
+    // selection — what the user is about to spend.
+    function aiCallEstimate(count) {
+      return count * Math.max(1, selectedCategories().length);
+    }
+
+    // Returns true when the pass completed; callers use it to avoid presenting
+    // a failed run as a clean "0 matches" result.
     async function refineAI() {
-      if (!LAST.length) return;
+      if (!LAST.length) return false;
+      let ok = true;
       const ids = LAST.map(a => a.advisory_id);
       $('#ai-btn').disabled = true;
       $('#retry-btn').disabled = true;
       setResultsBusy(true);
-      const orig = $('#ai-btn').innerHTML;
+      const orig = 'Refine with AI';
       $('#ai-btn').innerHTML = '<span class="spinner"></span>Refining…';
       try {
         await classifyIds(ids);
@@ -814,15 +1105,20 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
         }
         const matches = LAST.filter(a => (AI[a.advisory_id]||{}).is_match).length;
         const errs = failedIds().length;
+        recordHistoryMatches(matches);
         toast(`AI done: ${matches} matches` + (errs ? `, ${errs} still failing — use ↻ Retry failed` : ''),
               errs ? 'err' : 'ok');
       } catch (e) {
+        ok = false;
         toast(e.message, 'err');
       } finally {
+        // A literal label, not the captured innerHTML: a re-entrant call used to
+        // capture the spinner markup and restore that instead.
         $('#ai-btn').innerHTML = orig;
         setResultsBusy(false);
         render();
       }
+      return ok;
     }
 
     async function retryFailed() {
@@ -888,6 +1184,11 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
         ai_confidence: v.confidence != null ? v.confidence : '',
         ai_vuln_type: v.vuln_type || '',
         ai_reason: v.error ? v.error : (v.reason || ''),
+        // Without these a CSV cannot be told apart from one scored against a
+        // different bug class, or from one where some categories failed.
+        ai_scored_categories: (v.scored_categories || []).join('|'),
+        ai_matched_category: v.matched_category || '',
+        ai_has_errors: v.has_errors === true ? 'yes' : (v.error ? 'yes' : ''),
         published: (a.published_at || '').slice(0, 10),
         updated: (a.updated_at || '').slice(0, 10),
         withdrawn_at: a.withdrawn_at || '',
@@ -946,18 +1247,34 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
       const osvOk = OSV_SUPPORTED.includes(eco);
       // GHSA covers CWE-tagged advisories; OSV-native adds the no-CWE records the
       // AI can still catch. For "any" ecosystem OSV can't be used, so GHSA only.
-      setSources(osvOk ? ['ghsa', 'osv-native'] : ['ghsa']);
+      // Applied to this run only — silently rewriting the user's source choice
+      // meant the next plain search also used the overridden set.
+      const autoSources = osvOk ? ['ghsa', 'osv-native'] : ['ghsa'];
+      const chosen = $$('input[name=source]:checked').map(c => c.value);
+      const overridden = chosen.slice().sort().join() !== autoSources.slice().sort().join();
 
       const btn = $('#auto-btn');
       btn.disabled = true;
       const orig = btn.innerHTML;
       try {
         btn.innerHTML = '<span class="spinner"></span>1/3 Searching…';
-        await search();
+        if (overridden) {
+          toast('Auto scan uses ' + autoSources.map(s => s.toUpperCase()).join(' + ')
+                + ' for this run; your source selection is unchanged', 'ok');
+        }
+        const ok = await search({sources: autoSources});
+        // A failed search must not be reported as "nothing matched".
+        if (!ok) return;
         if (!LAST.length) { toast('No advisories match these filters', 'err'); return; }
         if (AI_CONFIGURED) {
           btn.innerHTML = '<span class="spinner"></span>2/3 AI classifying…';
-          await refineAI();               // includes auto-retry of failures
+          const scored = await refineAI();  // includes auto-retry of failures
+          if (!scored) {
+            // Reporting a failed pass as "0 confirmed matches" reads as
+            // "nothing is vulnerable", which is the opposite of the truth.
+            toast('AI pass failed — showing raw results, nothing was scored', 'err');
+            return;
+          }
           $('#only_match').checked = true; // 3/3 keep only real matches
           const n = currentItems().length;
           toast(`Auto done: ${n} confirmed match(es) shown`, 'ok');
@@ -977,14 +1294,44 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
     $('#ai-btn').addEventListener('click', refineAI);
     // "Only AI matches" is a display filter — but if nothing is scored yet it
     // would show an empty list, so auto-run the AI pass first, then filter.
+    // "Confirmed only" reads as a local filter but has to score the queue first,
+    // which costs real money. Never spend it without asking, and never leave the
+    // box checked (hiding everything) when the pass fails.
     $('#only_match').addEventListener('change', async (e) => {
       if (e.target.checked && LAST.length && unscoredCount() > 0) {
-        toast('Running AI first so there is something to filter…', 'ok');
-        await refineAI();
+        const pending = unscoredCount();
+        const calls = aiCallEstimate(pending);
+        const classes = Math.max(1, selectedCategories().length);
+        const proceed = window.confirm(
+          'Filtering to confirmed matches needs an AI pass first.\n\n'
+          + `${pending} advisory(ies) × ${classes} class(es) = about ${calls} AI call(s).\n\n`
+          + 'Run it now?');
+        if (!proceed) { e.target.checked = false; return; }
+        if (!await refineAI()) {
+          // The queue would otherwise look empty with no hint that unticking
+          // this box brings the raw results back.
+          e.target.checked = false;
+          toast('AI pass failed — showing the raw results again', 'err');
+        }
       }
       render();
     });
     $('#retry-btn').addEventListener('click', retryFailed);
+    // Per-card retry: the toolbar button can be scrolled far out of view by the
+    // time the user reads the error on a card.
+    $('#results').addEventListener('click', async (e) => {
+      const button = e.target.closest('.verdict-retry');
+      if (!button) return;
+      const id = button.dataset.retry;
+      button.disabled = true;
+      button.textContent = 'Retrying…';
+      try {
+        await classifyIds([id]);
+      } catch (err) {
+        toast(err.message, 'err');
+      }
+      render();
+    });
     $('#ai-test-pill').addEventListener('click', testAI);
     $('#filters-toggle').addEventListener('click', () => setFilterPanel(true));
     $('#filters-close').addEventListener('click', () => setFilterPanel(false));
@@ -998,8 +1345,14 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
     $('#cwe-search').addEventListener('keydown', e => {
       if (e.key === 'ArrowDown') { e.preventDefault(); moveComboActive(1); }
       else if (e.key === 'ArrowUp') { e.preventDefault(); moveComboActive(-1); }
+      // Tab means "done with this widget" — dismiss the popup, keep the move.
+      else if (e.key === 'Tab') { closeCombo(); }
       else if (e.key === 'Enter') {
+        if ($('#cwe-options').hidden) return;   // let the search shortcut through
         e.preventDefault();
+        // Without this, ⌘/Ctrl+Enter here would add the CWE *and* bubble to the
+        // global shortcut, launching a whole search on a single keystroke.
+        e.stopPropagation();
         pickEntry(comboMatches[comboActive >= 0 ? comboActive : 0]);
       } else if (e.key === 'Escape' && !$('#cwe-options').hidden) {
         e.stopPropagation();          // keep Escape from closing the whole panel
@@ -1035,7 +1388,18 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
       }
       renderSelection();
     });
-    $$('input[name=category]').forEach(box => box.addEventListener('change', renderSelection));
+    $$('input[name=category]').forEach(box => box.addEventListener('change', () => {
+      renderSelection();
+      filterClasses();   // a newly ticked class must not vanish behind the filter
+    }));
+    $('#class-search').addEventListener('input', filterClasses);
+    $('#class-search').addEventListener('keydown', e => {
+      if (e.key === 'Escape' && $('#class-search').value) {
+        e.stopPropagation();
+        $('#class-search').value = '';
+        filterClasses();
+      }
+    });
 
     // --- Recent searches ---
     $('#history-list').addEventListener('click', e => {
@@ -1043,14 +1407,13 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
       const drop = e.target.closest('.history-drop');
       const list = loadHistory();
       if (drop) {
-        list.splice(Number(drop.dataset.index), 1);
-        saveHistory(list);
+        saveHistory(list.filter(entry => entry.sig !== drop.dataset.sig));
         renderHistory();
         return;
       }
       if (!run) return;
-      const entry = list[Number(run.dataset.index)];
-      if (!entry) return;
+      const entry = list.find(item => item.sig === run.dataset.sig);
+      if (!entry) { renderHistory(); return; }   // another tab removed it
       applyState(entry.query);
       search();
     });
@@ -1065,6 +1428,11 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
       const finder = $('.cwe-finder');
       if (finder && !finder.contains(e.target)) closeCombo();
     });
+    // Tab used to leave the popup open and floating over the form.
+    $('.cwe-finder').addEventListener('focusout', e => {
+      const finder = $('.cwe-finder');
+      if (!e.relatedTarget || !finder.contains(e.relatedTarget)) closeCombo();
+    });
     $$('.export-pop button').forEach(b => b.addEventListener('click', () => doExport(b.dataset.fmt)));
     // Close the export menu when clicking outside it.
     document.addEventListener('click', e => {
@@ -1074,12 +1442,15 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
     $('#export-btn').addEventListener('click', e => {
       if (e.currentTarget.getAttribute('aria-disabled') === 'true') e.preventDefault();
     });
+    document.addEventListener('keydown', trapPanelTab, true);
     document.addEventListener('keydown', e => {
       if (e.key === 'Escape' && document.body.classList.contains('filters-open')) {
         setFilterPanel(false);
       } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
-        autoRun();
+        // The ⌘↵ hint is printed on "Search raw advisories", so it must run the
+        // free search — not the paid full pipeline.
+        search();
       }
     });
     window.addEventListener('resize', () => {
@@ -1092,6 +1463,7 @@ const { POPULAR, CLASSES, OSV_SUPPORTED, AI_CONFIGURED, AUTH_REQUIRED } = window
     // searchable immediately and CWE rows appear as soon as it lands.
     refreshPackages();
     renderSelection();
+    filterClasses();
     renderHistory();
     updateActionButtons();
     loadCweCatalog().then(renderSelection);

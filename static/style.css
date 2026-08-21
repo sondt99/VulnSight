@@ -6,8 +6,15 @@
   --panel-2: #1b2632;
   --panel-3: #243140;
   --ink: #e8eef3;
+  /* Text ramp. Every tier below --ink carries real copy somewhere, so each one
+     has to clear WCAG AA 4.5:1 against the *worst* surface it can land on:
+     --panel-2 in dark (the hover fill under .export-pop button, .combo-option
+     and .history-run) and --panel-3 in light. Measured worst-case ratios are
+     muted 5.9 / faint 5.1 / meta-dim 4.6 (dark) and 6.0 / 5.2 / 4.6 (light) --
+     roughly 1.4 ratio-units of room for three tiers, so do not dim any of them
+     without re-measuring the whole ramp. */
   --muted: #93a3b3;
-  --faint: #6d7d8d;
+  --faint: #8996a4;
   --line: #243140;
   --line-strong: #334556;
   --line-bright: #4a5d70;
@@ -15,9 +22,18 @@
   --accent-2: #7ee7cf;
   --accent-ink: #06231c;
   --ok: #3dd68c;
+  /* --warn / --bad are *text* colours (.badge--native, .badge--withdrawn,
+     button.warn-btn) and must clear 4.5:1 on --badge-bg; the --sev-* family are
+     *fills* behind dark ink and must stay bright enough for it. They coincide in
+     dark and deliberately diverge in light -- keep the two families separate. */
   --warn: #e6b84d;
   --bad: #ff5d73;
   --sev-critical: #ff5d73;
+  /* The critical fill is the only severity bright enough to need its own ink:
+     on the dark palette it takes the same dark ink as the other three badges
+     (6.4:1); on the light palette that ink only reaches 4.2:1, so light keeps
+     white (4.6:1). */
+  --sev-critical-ink: #081018;
   --sev-critical-hot: #ff2d78;
   --sev-high: #ff8a3d;
   --sev-high-hot: #ffc14a;
@@ -41,10 +57,9 @@
   --command-bg: rgba(11, 18, 24, .9);
   --scrim-bg: rgba(4, 8, 12, .62);
   --empty-bg: rgba(16, 24, 32, .72);
-  --text-on-accent: #06231c;
   --badge-border: #2c3c4c;
   --badge-subtle-border: #334556;
-  --meta-dim: #5c6d7d;
+  --meta-dim: #7e8fa0;
   --bar-track: #2a3848;
   --scrollbar-thumb: #3a4c5e;
   --card-shadow: rgba(0, 0, 0, .32);
@@ -59,18 +74,19 @@
     --panel-2: #f3f6f8;
     --panel-3: #e6eef2;
     --ink: #12202c;
-    --muted: #5b6b78;
-    --faint: #7a8a97;
+    --muted: #4d5b66;
+    --faint: #57646f;
     --line: #d7e1e8;
     --line-strong: #c2d0da;
     --line-bright: #9aafbd;
-    --accent: #0f8f78;
-    --accent-2: #137a68;
+    --accent: #0c7361;
+    --accent-2: #0a5e4f;
     --accent-ink: #ffffff;
     --ok: #1a9d63;
-    --warn: #c48a12;
-    --bad: #d63b55;
+    --warn: #835c0c;
+    --bad: #bb2a42;
     --sev-critical: #d63b55;
+    --sev-critical-ink: #ffffff;
     --sev-critical-hot: #c2185b;
     --sev-high: #e06a16;
     --sev-high-hot: #d09200;
@@ -89,10 +105,9 @@
     --command-bg: rgba(244, 247, 248, .92);
     --scrim-bg: rgba(12, 22, 30, .4);
     --empty-bg: rgba(255, 255, 255, .88);
-    --text-on-accent: #ffffff;
     --badge-border: #d3dee6;
     --badge-subtle-border: #c8d5de;
-    --meta-dim: #8a9aa7;
+    --meta-dim: #5c6c7a;
     --bar-track: #dbe4ea;
     --scrollbar-thumb: #b7c6d0;
     --card-shadow: rgba(18, 32, 44, .08);
@@ -107,18 +122,19 @@
   --panel-2: #f3f6f8;
   --panel-3: #e6eef2;
   --ink: #12202c;
-  --muted: #5b6b78;
-  --faint: #7a8a97;
+  --muted: #4d5b66;
+  --faint: #57646f;
   --line: #d7e1e8;
   --line-strong: #c2d0da;
   --line-bright: #9aafbd;
-  --accent: #0f8f78;
-  --accent-2: #137a68;
+  --accent: #0c7361;
+  --accent-2: #0a5e4f;
   --accent-ink: #ffffff;
   --ok: #1a9d63;
-  --warn: #c48a12;
-  --bad: #d63b55;
+  --warn: #835c0c;
+  --bad: #bb2a42;
   --sev-critical: #d63b55;
+  --sev-critical-ink: #ffffff;
   --sev-critical-hot: #c2185b;
   --sev-high: #e06a16;
   --sev-high-hot: #d09200;
@@ -137,10 +153,9 @@
   --command-bg: rgba(244, 247, 248, .92);
   --scrim-bg: rgba(12, 22, 30, .4);
   --empty-bg: rgba(255, 255, 255, .88);
-  --text-on-accent: #ffffff;
   --badge-border: #d3dee6;
   --badge-subtle-border: #c8d5de;
-  --meta-dim: #8a9aa7;
+  --meta-dim: #5c6c7a;
   --bar-track: #dbe4ea;
   --scrollbar-thumb: #b7c6d0;
   --card-shadow: rgba(18, 32, 44, .08);
@@ -155,7 +170,7 @@
   --panel-3: #243140;
   --ink: #e8eef3;
   --muted: #93a3b3;
-  --faint: #6d7d8d;
+  --faint: #8996a4;
   --line: #243140;
   --line-strong: #334556;
   --line-bright: #4a5d70;
@@ -166,6 +181,7 @@
   --warn: #e6b84d;
   --bad: #ff5d73;
   --sev-critical: #ff5d73;
+  --sev-critical-ink: #081018;
   --sev-critical-hot: #ff2d78;
   --sev-high: #ff8a3d;
   --sev-high-hot: #ffc14a;
@@ -184,10 +200,9 @@
   --command-bg: rgba(11, 18, 24, .9);
   --scrim-bg: rgba(4, 8, 12, .62);
   --empty-bg: rgba(16, 24, 32, .72);
-  --text-on-accent: #06231c;
   --badge-border: #2c3c4c;
   --badge-subtle-border: #334556;
-  --meta-dim: #5c6d7d;
+  --meta-dim: #7e8fa0;
   --bar-track: #2a3848;
   --scrollbar-thumb: #3a4c5e;
   --card-shadow: rgba(0, 0, 0, .32);
@@ -453,7 +468,7 @@ select {
   background-repeat: no-repeat;
   background-position: right 10px center;
 }
-select:hover, input[type="text"]:hover { border-color: var(--line-strong); }
+select:hover, input[type="text"]:hover, input[type="search"]:hover { border-color: var(--line-strong); }
 
 input[type="checkbox"] {
   position: relative;
@@ -504,7 +519,75 @@ input[type="checkbox"]:disabled { cursor: not-allowed; opacity: .35; }
 .source-code, .c-label { color: var(--ink); font-size: 12.5px; font-weight: 700; }
 .source-code { font-family: var(--mono); letter-spacing: .02em; }
 .c-desc { color: var(--muted); font-size: 11.5px; line-height: 1.35; overflow-wrap: anywhere; }
-.taxonomy-list { max-height: 280px; overflow: auto; padding-right: 2px; }
+
+/* input[type="search"] is not in the shared field rule above, so it would
+   render as raw browser chrome. Compact on purpose: this narrows an existing
+   list, it is not the primary CWE finder above it. `appearance` is left alone
+   so the native clear button survives -- color-scheme already renders it
+   light-on-dark / dark-on-light, and the JS Escape handler is keyboard-only. */
+.class-filter { margin: 2px 0 8px; }
+.class-filter input[type="search"] {
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 10px;
+  color: var(--ink);
+  background-color: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+}
+.class-filter input[type="search"]::placeholder { color: var(--faint); }
+.class-filter input[type="search"]::-webkit-search-cancel-button { cursor: pointer; }
+
+/* 29 items + 7 headings is ~1900px of content. A 280px window hid nearly all
+   of it and chained its overscroll to the rail, so the well is taller, the
+   chain is cut, and the border + inset surface make it read as a scroll
+   region rather than a clipped list. */
+.taxonomy-list {
+  max-height: min(52vh, 520px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: 6px;
+  background: var(--surface-inset);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.taxonomy-group {
+  /* Sticks to the top of the well so the group a row belongs to stays legible
+     while scrolling. --surface-inset is opaque in both themes, which it has to
+     be: rows pass underneath it. */
+  position: sticky;
+  top: -6px;
+  z-index: 1;
+  margin: 10px 0 0;
+  padding: 5px 2px 5px;
+  color: var(--faint);
+  background: var(--surface-inset);
+  /* .cats puts a 4px gap above this flex item; without the band a sliver of the
+     row scrolling underneath shows through between the two. */
+  box-shadow: 0 -5px 0 0 var(--surface-inset);
+  font: 650 10px var(--mono);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.taxonomy-group:first-child { margin-top: 0; }
+.taxonomy-group[hidden] { display: none; }
+/* .cat sets display:grid, which beats the UA sheet's [hidden] { display:none },
+   so the filter's item.hidden would otherwise do nothing at all. */
+.taxonomy-item[hidden] { display: none; }
+/* "Kept because it is selected, not because it matches" -- same inset accent
+   rule .combo-option.class uses, deliberately quiet. */
+.taxonomy-item.filtered-keep { box-shadow: inset 2px 0 0 var(--accent); }
+.taxonomy-empty {
+  margin: 0;
+  padding: 16px 10px;
+  color: var(--faint);
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: center;
+}
+.taxonomy-empty[hidden] { display: none; }
 .nvd-hint {
   margin: 0 0 4px 26px;
   color: var(--faint);
@@ -543,7 +626,10 @@ input[type="checkbox"]:disabled { cursor: not-allowed; opacity: .35; }
 .combo-input input[type="text"] {
   width: 100%;
   min-width: 0;
-  min-height: 0;
+  /* The wrapper owned all 38px of height while the input itself was only as
+     tall as its text, leaving ~9px dead strips above and below. The <label>
+     wrapper forwards those clicks, but the control is now a real target too. */
+  min-height: 36px;
   flex: 1 1 auto;
   padding: 0;
   background: transparent;
@@ -637,8 +723,18 @@ input[type="checkbox"]:disabled { cursor: not-allowed; opacity: .35; }
   background: color-mix(in srgb, var(--accent) 16%, var(--panel));
   border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
 }
+/* The accent wash is the one surface in the app that sits outside the --panel..
+   --panel-3 luminance envelope the text ramp is tuned against, so the two
+   quietest tiers fall to 3.6:1 (dark) / 4.3:1 (light) on it. This is also the
+   row the user is actively reading, so both step up to --muted (4.7:1 dark,
+   5.6:1 light) rather than the wash being weakened. */
+.combo-option[aria-selected="true"] .combo-note,
+.combo-option[aria-selected="true"] .combo-alias { color: var(--muted); }
 .combo-option.class { box-shadow: inset 2px 0 0 var(--accent); }
-.combo-option.picked { padding-right: 26px; opacity: .58; }
+/* Same reason as .card.dim: a picked row stays selectable content, so the
+   "already added" cue is the check mark and the .combo-in chip, not a group
+   opacity (which put .combo-note at 2.5:1). */
+.combo-option.picked { padding-right: 26px; }
 .combo-option.picked::after {
   position: absolute;
   top: 6px;
@@ -797,7 +893,23 @@ input[type="checkbox"]:disabled { cursor: not-allowed; opacity: .35; }
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
 }
-.history-meta { max-width: 100%; display: flex; align-items: center; gap: 8px; }
+/* Four fields in a ~250px row. Counts share the first line; the query detail
+   gets the second one to itself and ellipsizes, and the timestamp is lifted out
+   of flow to the end of that line so a long detail can never push the row to a
+   third or fourth line. Flex (not grid) because renderHistory emits a bare
+   " · " text node between the counts, which grid would place as its own item. */
+.history-meta {
+  position: relative;
+  max-width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 6px;
+  /* Reserves the strip .history-when is lifted into; wide enough for the
+     longest label relativeTime() produces ("yesterday" / "365d ago"). */
+  padding-right: 4.25rem;
+}
 .history-count {
   padding: 1px 5px;
   color: var(--muted);
@@ -807,7 +919,25 @@ input[type="checkbox"]:disabled { cursor: not-allowed; opacity: .35; }
   font: 650 10px/1.5 var(--mono);
   white-space: nowrap;
 }
-.history-when { color: var(--faint); font: 550 10px/1.5 var(--mono); white-space: nowrap; }
+.history-matches { color: var(--accent); font: 650 10px/1.5 var(--mono); white-space: nowrap; }
+.history-detail {
+  /* 100% basis == always its own line, whether or not .history-matches exists. */
+  flex: 1 1 100%;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--faint);
+  font: 550 10px/1.5 var(--mono);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.history-when {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  color: var(--faint);
+  font: 550 10px/1.5 var(--mono);
+  white-space: nowrap;
+}
 .history-drop { align-self: center; }
 
 @keyframes cat-added {
@@ -832,7 +962,20 @@ input[type="checkbox"]:disabled { cursor: not-allowed; opacity: .35; }
   .combo-list { max-height: min(44vh, 340px); }
 }
 
-.control-actions { padding: 18px 20px 22px; background: var(--surface-deep); }
+/* The rail is ~1700px tall, so both search buttons used to sit below the fold
+   and reaching them scrolled the whole document -- taking the results column
+   with it. .control-rail is a stretched grid item, so its box is as tall as the
+   taller of the two columns; that gives this footer real travel room and it
+   pins to the bottom of the viewport for the whole scroll. Opaque
+   --surface-deep, not a tint, because cards slide underneath it. */
+.control-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  padding: 18px 20px 22px;
+  background: var(--surface-deep);
+  border-top: 1px solid var(--line);
+}
 button {
   min-height: 38px;
   cursor: pointer;
@@ -845,7 +988,23 @@ button {
 }
 button:hover:not(:disabled) { border-color: var(--line-bright); }
 button:active:not(:disabled) { transform: translateY(1px); }
-button:disabled { cursor: not-allowed; opacity: .4; }
+/* Disabled controls are exempt from 1.4.3, but they still have to be readable:
+   four of them are disabled on first load and one of them explains itself.
+   Opacity cannot get there — .4 rendered ~1.7:1 and even .55 caps around
+   2.4-3.5:1 because it multiplies down whatever token is underneath. So the
+   inactive state is expressed with tokens instead (muted ink, recessed fill,
+   not-allowed cursor), which keeps the label legible and stops an
+   accent-filled disabled button out-shouting every enabled control. */
+button:disabled {
+  cursor: not-allowed;
+  color: var(--faint);
+  border-color: var(--line);
+}
+button.primary:disabled, button.ai:disabled, button.pill-action:disabled {
+  color: var(--faint);
+  background: var(--panel-2);
+  border-color: var(--line-strong);
+}
 
 button.primary {
   width: 100%;
@@ -860,7 +1019,9 @@ button.primary {
   border-color: var(--accent);
 }
 button.primary:hover:not(:disabled) { background: var(--accent-2); border-color: var(--accent-2); }
-.button-kicker { font: 700 10px var(--mono); letter-spacing: .12em; text-transform: uppercase; opacity: .7; }
+/* .7 put the kicker at 2.7:1 on the light accent fill. .9 keeps it visibly
+   secondary to .button-main while clearing AA (5.0:1 light, 7.1:1 dark). */
+.button-kicker { font: 700 10px var(--mono); letter-spacing: .12em; text-transform: uppercase; opacity: .9; }
 .button-main { margin-top: 2px; font-size: 14.5px; letter-spacing: -.02em; }
 
 .secondary-action {
@@ -952,6 +1113,8 @@ kbd {
 .summary b { color: var(--ink); }
 .summary code { white-space: normal; }
 .summary-cached { color: var(--accent); }
+/* Both mean "this count is not the whole truth", so they share the warn hue. */
+.summary-capped, .summary-unscored { color: var(--warn); }
 
 .toolbar-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
 .toolbar-actions > button { padding: 0 12px; white-space: nowrap; }
@@ -959,6 +1122,8 @@ button.ai { color: var(--accent-ink); background: var(--accent); border-color: v
 button.ai:hover:not(:disabled) { background: var(--accent-2); border-color: var(--accent-2); }
 button.warn-btn { color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent); border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
 button.warn-btn:hover:not(:disabled) { border-color: var(--warn); }
+/* Drop the warn tint when inactive: --faint over it only reached 3.5:1 in light. */
+button.warn-btn:disabled { background: var(--panel-2); }
 
 .match-filter {
   min-height: 38px;
@@ -989,7 +1154,14 @@ button.warn-btn:hover:not(:disabled) { border-color: var(--warn); }
   font-weight: 650;
 }
 .export-menu > summary::-webkit-details-marker { display: none; }
-.export-menu > summary[aria-disabled="true"] { cursor: not-allowed; opacity: .4; }
+/* Token-based, like button:disabled — this control stays in the tab order while
+   disabled so its label has to stay readable (opacity .55 left it at 3.7:1). */
+.export-menu > summary[aria-disabled="true"] {
+  cursor: not-allowed;
+  color: var(--faint);
+  background: var(--panel-2);
+  border-color: var(--line);
+}
 .export-menu[open] > summary { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
 .export-pop {
   position: absolute;
@@ -1008,6 +1180,23 @@ button.warn-btn:hover:not(:disabled) { border-color: var(--warn); }
 .export-pop button:hover { background: var(--panel-2); }
 .export-pop button span { font: 700 12px var(--sans); }
 .export-pop button small { margin-top: 2px; color: var(--faint); font-size: 11px; font-weight: 500; }
+
+/* The one thing standing between the reader and a wrong conclusion, so it is a
+   strip across the whole results column rather than an inline note -- but it is
+   still a strip, not a modal: the queue underneath stays usable. */
+.stale-banner {
+  min-width: 0;
+  margin: 14px 0 0;
+  padding: 10px 14px;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--warn) 14%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line));
+  border-radius: var(--radius-sm);
+  box-shadow: inset 3px 0 0 var(--warn);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.stale-banner[hidden] { display: none; }
 
 .results { min-width: 0; padding-top: 16px; }
 .card {
@@ -1034,7 +1223,17 @@ button.warn-btn:hover:not(:disabled) { border-color: var(--warn); }
 .card.sevbar-medium { --severity: var(--sev-medium); }
 .card.sevbar-low { --severity: var(--sev-low); }
 .card.sevbar-unknown { --severity: var(--line-bright); }
-.card.dim { opacity: .62; }
+/* A de-emphasised card is still content, and a group opacity dims its text
+   along with everything else: at .62 the .meta-label tier measured 2.6:1, and
+   even .9 only reaches 4.1:1 -- no opacity value keeps this card AA. So the
+   de-emphasis lives in the surface and the severity bar, and every text tier
+   inside keeps its full ratio. */
+.card.dim {
+  background: var(--surface-deep);
+  border-color: var(--line);
+  box-shadow: none;
+}
+.card.dim::before { opacity: .5; }
 
 .card-top { display: flex; align-items: flex-start; gap: 14px; }
 .card-top .title {
@@ -1074,16 +1273,42 @@ button.warn-btn:hover:not(:disabled) { border-color: var(--warn); }
 .sev.low { background: var(--sev-low); }
 .sev.medium { background: var(--sev-medium); }
 .sev.high { background: var(--sev-high); }
-.sev.critical { color: #fff; background: var(--sev-critical); }
+.sev.critical { color: var(--sev-critical-ink); background: var(--sev-critical); }
 .sev.unknown { color: var(--ink); background: var(--panel-3); border: 1px solid var(--line-bright); }
-.badge.cwe { color: var(--ink); }
+/* The badge carries the id *and* the name now, so the id keeps the mono
+   treatment and the name is a quieter second field behind a hairline divider.
+   Several of these can sit on one row, hence the cap and the ellipsis. */
+.badge.cwe {
+  max-width: min(100%, 28ch);
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  overflow: hidden;
+  color: var(--ink);
+  /* .badge sets overflow-wrap: anywhere for long package names; here it broke
+     the id itself across two lines ("CWE-" / "639"). The id must stay one
+     token -- the name is the part that is allowed to be cut. */
+  white-space: nowrap;
+  overflow-wrap: normal;
+  vertical-align: bottom;
+}
+.badge.cwe small {
+  min-width: 0;
+  overflow: hidden;
+  padding-left: 6px;
+  border-left: 1px solid var(--badge-border);
+  color: var(--muted);
+  font: 500 10.5px/1.35 var(--sans);
+  letter-spacing: 0;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 .badge.pkg { font-weight: 500; }
 .badge.eco { text-transform: uppercase; letter-spacing: .04em; }
 .badge.src { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
 .badge--native { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, var(--line)); }
 .badge--withdrawn { color: var(--bad); text-decoration: line-through; }
 .badge--kev { color: #081018; background: var(--sev-high); border-color: var(--sev-high); font-weight: 800; }
-.badge--epss { color: var(--accent-2); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
 .desc { margin-top: 8px; color: var(--muted); font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere; }
 .muted { color: var(--faint); }
 .meta {
@@ -1127,15 +1352,39 @@ button.warn-btn:hover:not(:disabled) { border-color: var(--warn); }
 }
 .ai-verdict.match { border-color: color-mix(in srgb, var(--ok) 50%, var(--line)); box-shadow: inset 3px 0 0 var(--ok); }
 .ai-verdict.nomatch { color: var(--muted); box-shadow: inset 3px 0 0 var(--line-bright); }
+/* "Scoring failed halfway" was the only state without a colour, so it read as a
+   clean result. It shares the warn hue with the other "do not trust this yet"
+   signals (.stale-banner, .summary-capped, .verdict-retry). */
+.ai-verdict.partial { border-color: color-mix(in srgb, var(--warn) 50%, var(--line)); box-shadow: inset 3px 0 0 var(--warn); }
 .ai-verdict.error { border-color: color-mix(in srgb, var(--bad) 50%, var(--line)); box-shadow: inset 3px 0 0 var(--bad); }
 .verdict-head { display: flex; align-items: center; gap: 7px; font-weight: 700; }
 .verdict-state { display: inline-flex; align-items: center; gap: 7px; }
 .verdict-state::before { width: 7px; height: 7px; content: ""; background: var(--faint); border-radius: 50%; }
 .match .verdict-state::before { background: var(--ok); }
 .nomatch .verdict-state::before { background: var(--line-bright); }
+.partial .verdict-state::before { background: var(--warn); }
 .error .verdict-state::before { background: var(--bad); }
 .verdict-type { color: var(--muted); font-weight: 600; }
 .verdict-score { margin-left: auto; color: var(--faint); font: 600 11px var(--mono); }
+.verdict-retry {
+  /* Escapes the global 38px button height -- this sits in a 17px head row --
+     but not below 24px, which is the WCAG 2.5.8 floor for a pointer target. */
+  min-height: 24px;
+  margin-left: auto;
+  padding: 2px 8px;
+  color: var(--warn);
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line));
+  border-radius: 4px;
+  font: 700 10px var(--mono);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.verdict-retry:hover:not(:disabled) {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+  border-color: var(--warn);
+}
 .conf-bar {
   width: 100%;
   height: 4px;
@@ -1148,8 +1397,22 @@ button.warn-btn:hover:not(:disabled) { border-color: var(--warn); }
   border-radius: 99px;
 }
 .conf-bar::-webkit-progress-bar { background: var(--bar-track); }
+/* Bar length is the fastest-read signal on a card, so the fill has to agree
+   with the verdict: a 97%-confident *non*-match used to draw the same long
+   brand-teal bar as a 97%-confident match. The vendor pseudo-elements cannot
+   share a selector list -- one unknown pseudo drops the whole rule -- so each
+   engine gets its own block. */
 .conf-bar::-webkit-progress-value { background: var(--accent); }
+.match .conf-bar::-webkit-progress-value { background: var(--ok); }
+.nomatch .conf-bar::-webkit-progress-value { background: var(--line-bright); }
+.partial .conf-bar::-webkit-progress-value { background: var(--warn); }
+.error .conf-bar::-webkit-progress-value { background: var(--warn); }
+
 .conf-bar::-moz-progress-bar { background: var(--accent); }
+.match .conf-bar::-moz-progress-bar { background: var(--ok); }
+.nomatch .conf-bar::-moz-progress-bar { background: var(--line-bright); }
+.partial .conf-bar::-moz-progress-bar { background: var(--warn); }
+.error .conf-bar::-moz-progress-bar { background: var(--warn); }
 
 .empty, .loading {
   color: var(--muted);
@@ -1280,6 +1543,17 @@ code {
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* On a short laptop the rail's decorative header plus the 187px sticky footer
+   squeezed the bug-class well down to ~33px — a bordered scroll region with
+   nothing in it. Reclaim the space from the prose, not from the controls. */
+@media (max-height: 900px) {
+  .rail-intro { padding: 14px 20px 12px; }
+  .rail-intro p { display: none; }
+  .rail-intro h2 { margin: 4px 0 8px; font-size: 17px; }
+  .control-actions { padding: 12px 20px 14px; }
+  .action-note { display: none; }
+}
+
 @media (max-width: 1180px) {
   .status-title, .cache-pill { display: none; }
   .layout { grid-template-columns: 300px minmax(0, 1fr); }
@@ -1403,6 +1677,43 @@ code {
 
 @media (max-width: 370px) {
   .row { grid-template-columns: 1fr; }
+}
+
+/* WCAG 2.5.8 / 2.5.5: every control below is under 44x44 CSS px. Scoped to
+   coarse pointers so the desktop layout keeps its compact chrome.
+   Two strategies: controls with room to grow get real size; the ones wedged
+   into a chip, an input or a verdict head get a transparent ::after hit
+   expander instead, because growing them would reflow their container. */
+@media (pointer: coarse) {
+  .theme-toggle,
+  .filters-toggle,
+  .rail-close,
+  button.pill {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .history-drop {
+    width: 44px;
+    height: 44px;
+    flex-basis: 44px;
+  }
+
+  .combo-clear, .chip-x, .verdict-retry { position: relative; }
+  /* 24px + 2 * 10px = 44px. Absolute, so it never becomes a grid/flex item of
+     the button itself and never changes the visual size. */
+  .combo-clear::after,
+  .chip-x::after {
+    position: absolute;
+    inset: -10px;
+    content: "";
+  }
+  /* 24px tall inside .verdict-head, so the block axis needs +10px each side;
+     the inline axis is already 51px and must not reach across the head row. */
+  .verdict-retry::after {
+    position: absolute;
+    inset: -10px -6px;
+    content: "";
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -34,6 +34,10 @@ pass** is for: it reads each advisory and returns a structured verdict
   and pick from all 944 weaknesses of CWE 4.20. Any single CWE becomes an ad-hoc
   bug class that is both filtered on and AI-scored. The catalog is searched in
   the browser, so results appear as you type.
+- **29 curated bug classes** in 7 groups — injection, access control, files and
+  server-side requests, crypto and secrets, memory and concurrency, availability
+  — each with a core/extended CWE split, an AI-prompt definition, and the
+  community terms people actually search for. The list is filterable in place.
 - **Recent searches** — the last 12 queries are restored with one click.
 - **Scope by** ecosystem (Maven/Go/npm/pip/…), package, severity, publish date.
 - **AI refinement** — confirm true matches across every selected bug class and surface source-native records

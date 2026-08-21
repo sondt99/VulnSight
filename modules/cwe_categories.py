@@ -27,17 +27,25 @@ from .cwe_catalog import ALIASES, ABSTRACTION, CWE_VERSION, DEPRECATED, NAMES
 # ---------------------------------------------------------------------------
 # Category -> metadata
 # ---------------------------------------------------------------------------
-# "code"     : short badge shown in the UI's fixed-width code column, so a long
-#              key like "deserialization" cannot crowd out the CWE name
-# "core"     : CWEs that almost always mean this bug class (high precision)
-# "extended" : broader CWEs that often but not always belong (higher recall,
-#              more noise -> good candidates for the AI refinement pass)
+# "code"        : short badge shown in the UI's fixed-width code column, so a
+#                 long key like "deserialization" cannot crowd out the CWE name
+# "group"       : heading the class is listed under in the picker
+# "label"       : also the class name given to the AI
+# "description" : also the class *definition* given to the AI, so it has to be
+#                 precise enough to judge a borderline advisory against
+# "core"        : CWEs that almost always mean this bug class (high precision)
+# "extended"    : broader CWEs that often but not always belong (higher recall,
+#                 more noise -> good candidates for the AI refinement pass)
+#
+# Every field is enforced by tests/test_cwe_categories.py. Adding a class also
+# needs a KEYWORDS entry below, or OSV-native records will never match it.
 # ---------------------------------------------------------------------------
 MAX_CATEGORY_CODE_LENGTH = 5
 
 CATEGORIES: dict[str, dict] = {
     "bac": {
         "code": "BAC",
+        "group": "Access control & auth",
         "label": "Broken Access Control (BAC / BOLA / BFLA / IDOR)",
         "description": (
             "Authorization and access-control flaws: object-level (BOLA/IDOR), "
@@ -66,6 +74,7 @@ CATEGORIES: dict[str, dict] = {
     },
     "sqli": {
         "code": "SQLI",
+        "group": "Injection",
         "label": "SQL Injection",
         "description": "Improper neutralization of SQL / NoSQL query elements.",
         "core": ["89"],
@@ -73,6 +82,7 @@ CATEGORIES: dict[str, dict] = {
     },
     "xss": {
         "code": "XSS",
+        "group": "Injection",
         "label": "Cross-Site Scripting (XSS)",
         "description": "Improper neutralization of input during web page generation.",
         "core": ["79"],
@@ -80,6 +90,7 @@ CATEGORIES: dict[str, dict] = {
     },
     "ssti": {
         "code": "SSTI",
+        "group": "Injection",
         "label": "Server-Side Template Injection / Code Injection",
         "description": "Template injection and dynamic code evaluation flaws.",
         "core": ["1336", "94"],  # SSTI, Improper Control of Code Generation
@@ -87,6 +98,7 @@ CATEGORIES: dict[str, dict] = {
     },
     "cmdi": {
         "code": "CMDI",
+        "group": "Injection",
         "label": "OS / Command Injection",
         "description": "Improper neutralization of OS command / argument elements.",
         "core": ["77", "78"],
@@ -94,6 +106,7 @@ CATEGORIES: dict[str, dict] = {
     },
     "ssrf": {
         "code": "SSRF",
+        "group": "Files & server-side requests",
         "label": "Server-Side Request Forgery (SSRF)",
         "description": "Server can be coerced into making unintended requests.",
         "core": ["918"],
@@ -101,6 +114,7 @@ CATEGORIES: dict[str, dict] = {
     },
     "pathtraversal": {
         "code": "PATH",
+        "group": "Files & server-side requests",
         "label": "Path Traversal / File Disclosure",
         "description": "Improper limitation of a pathname to a restricted directory.",
         "core": ["22"],
@@ -108,6 +122,7 @@ CATEGORIES: dict[str, dict] = {
     },
     "deserialization": {
         "code": "DESER",
+        "group": "Injection",
         "label": "Insecure Deserialization",
         "description": "Deserialization of untrusted data leading to RCE / DoS.",
         "core": ["502"],
@@ -115,10 +130,264 @@ CATEGORIES: dict[str, dict] = {
     },
     "xxe": {
         "code": "XXE",
+        "group": "Injection",
         "label": "XML External Entity (XXE)",
         "description": "Improper restriction of XML external entity references.",
         "core": ["611"],
         "extended": ["827", "776"],
+    },
+    # ---- Injection -------------------------------------------------------
+    "queryinj": {
+        "code": "QINJ",
+        "group": "Injection",
+        "label": "LDAP / XPath / XQuery Injection",
+        "description": (
+            "Untrusted input concatenated into a non-SQL query language, so the "
+            "attacker changes the query's structure: LDAP filters, XPath or "
+            "XQuery expressions."
+        ),
+        "core": ["643", "90"],
+        "extended": ["91", "652"],
+    },
+    "crlf": {
+        "code": "CRLF",
+        "group": "Injection",
+        "label": "CRLF / Header Injection & Request Smuggling",
+        "description": (
+            "Unescaped carriage returns or newlines let the attacker inject HTTP "
+            "headers, split a response, forge log entries, or desynchronise a "
+            "proxy from the origin (request smuggling)."
+        ),
+        "core": ["93", "113"],
+        "extended": ["117", "444"],
+    },
+    "protopollution": {
+        "code": "PROTO",
+        "group": "Injection",
+        "label": "Prototype Pollution",
+        "description": (
+            "Attacker-controlled keys reach a recursive merge, clone or property "
+            "assignment and modify Object.prototype (or another shared object's "
+            "attributes), changing behaviour across the whole program."
+        ),
+        "core": ["1321"],
+        "extended": ["915"],
+    },
+
+    # ---- Access control & auth -------------------------------------------
+    "csrf": {
+        "code": "CSRF",
+        "group": "Access control & auth",
+        "label": "Cross-Site Request Forgery (CSRF)",
+        "description": (
+            "A state-changing request is accepted using only ambient credentials, "
+            "so another site can cause it to be sent on the victim's behalf. "
+            "Missing or bypassable anti-CSRF tokens and SameSite gaps."
+        ),
+        "core": ["352"],
+        "extended": ["1275"],
+    },
+    "cors": {
+        "code": "CORS",
+        "group": "Access control & auth",
+        "label": "CORS / Origin Validation Failure",
+        "description": (
+            "Cross-origin access control is too permissive or the Origin is "
+            "validated incorrectly (reflected origins, null origin, sloppy "
+            "prefix or suffix matching), letting an untrusted site read responses."
+        ),
+        "core": ["942"],
+        "extended": ["346", "1385"],
+    },
+    "session": {
+        "code": "SESS",
+        "group": "Access control & auth",
+        "label": "Session Management Flaws",
+        "description": (
+            "Session identifiers survive when they should not, or are accepted "
+            "when they should not be: session fixation, sessions that never "
+            "expire, tokens left valid after logout, sensitive persistent cookies."
+        ),
+        "core": ["384"],
+        "extended": ["613", "539", "488"],
+    },
+    "hardcodedcreds": {
+        "code": "CREDS",
+        "group": "Access control & auth",
+        "label": "Hard-coded / Default Credentials",
+        "description": (
+            "A password, API key or cryptographic key is embedded in the shipped "
+            "artifact, or a default credential is active out of the box, so every "
+            "deployment shares the same secret."
+        ),
+        "core": ["798"],
+        "extended": ["259", "321", "1392"],
+    },
+    "clickjacking": {
+        "code": "CLICK",
+        "group": "Access control & auth",
+        "label": "Clickjacking / UI Redressing",
+        "description": (
+            "The UI can be framed or overlaid by another origin, so a victim's "
+            "click lands on an action they cannot see."
+        ),
+        "core": ["1021"],
+        "extended": [],
+    },
+
+    # ---- Files & server-side requests ------------------------------------
+    "openredirect": {
+        "code": "OPRED",
+        "group": "Files & server-side requests",
+        "label": "Open Redirect",
+        "description": (
+            "A redirect target is taken from user input without validation, so "
+            "the application forwards victims to an attacker-chosen site — often "
+            "the pivot for phishing or for stealing tokens in the URL."
+        ),
+        "core": ["601"],
+        "extended": ["610"],
+    },
+    "upload": {
+        "code": "UPLD",
+        "group": "Files & server-side requests",
+        "label": "Unrestricted File Upload",
+        "description": (
+            "The type, extension or content of an uploaded file is not restricted, "
+            "letting the attacker place executable or interpreter-visible content "
+            "where the server will run it."
+        ),
+        "core": ["434"],
+        "extended": ["646", "351", "436"],
+    },
+    "searchpath": {
+        "code": "SPATH",
+        "group": "Files & server-side requests",
+        "label": "Untrusted Search Path / Library Hijack",
+        "description": (
+            "A library, helper binary or plugin is resolved through a path the "
+            "attacker can influence (current directory, writable PATH entry, "
+            "unquoted path), so their code is loaded instead."
+        ),
+        "core": ["426", "427"],
+        "extended": ["428", "114"],
+    },
+
+    # ---- Crypto & secrets ------------------------------------------------
+    "crypto": {
+        "code": "CRYPT",
+        "group": "Crypto & secrets",
+        "label": "Broken Cryptography & Verification",
+        "description": (
+            "A broken or misapplied cryptographic primitive, or a verification "
+            "step that does not actually verify: risky algorithms, weak hashes "
+            "for passwords, unchecked signatures, unvalidated certificates."
+        ),
+        "core": ["327", "347", "295"],
+        "extended": ["326", "328", "916", "261", "759", "760", "780", "323", "324"],
+    },
+    "randomness": {
+        "code": "RAND",
+        "group": "Crypto & secrets",
+        "label": "Insufficient Randomness",
+        "description": (
+            "A value that must be unguessable is generated from a non-crypto PRNG, "
+            "a predictable seed or observable state — tokens, session ids, "
+            "password-reset links, nonces."
+        ),
+        "core": ["330", "338"],
+        "extended": ["335", "340", "341", "1241"],
+    },
+    "infoleak": {
+        "code": "INFO",
+        "group": "Crypto & secrets",
+        "label": "Sensitive Information Disclosure",
+        "description": (
+            "Data crosses a boundary it should not: secrets in logs or error "
+            "messages, internal system detail in responses, credentials in source "
+            "or metadata. Umbrella CWE-200 is broad, so confirm the leaked value "
+            "is genuinely sensitive."
+        ),
+        "core": ["200"],
+        "extended": ["209", "532", "359", "497", "215", "540", "1230"],
+    },
+
+    # ---- Memory & concurrency -------------------------------------------
+    "memory": {
+        "code": "MEM",
+        "group": "Memory & concurrency",
+        "label": "Memory Safety (OOB / UAF / Double Free)",
+        "description": (
+            "Spatial or temporal memory errors in native or unsafe code: reads "
+            "and writes outside an allocation, use after free, double free, null "
+            "dereference, type confusion."
+        ),
+        "core": ["787", "125", "416", "415", "476"],
+        "extended": ["121", "122", "119", "120", "824", "908", "843", "401", "590"],
+    },
+    "intoverflow": {
+        "code": "INT",
+        "group": "Memory & concurrency",
+        "label": "Integer Overflow / Wraparound",
+        "description": (
+            "Arithmetic exceeds the range of its type and wraps, or a conversion "
+            "loses sign or precision, so a length or index check is computed on "
+            "the wrong value."
+        ),
+        "core": ["190"],
+        "extended": ["191", "192", "197", "680", "681"],
+    },
+    "race": {
+        "code": "RACE",
+        "group": "Memory & concurrency",
+        "label": "Race Condition / TOCTOU",
+        "description": (
+            "Concurrent access to a shared resource without adequate "
+            "synchronisation, including check-then-use windows where the state "
+            "changes between the check and the use."
+        ),
+        "core": ["362", "367"],
+        "extended": ["366", "421", "1223"],
+    },
+
+    # ---- Availability ----------------------------------------------------
+    "redos": {
+        "code": "REDOS",
+        "group": "Availability",
+        "label": "Regular Expression DoS (ReDoS)",
+        "description": (
+            "A regular expression with super-linear behaviour is applied to "
+            "attacker-controlled input, so a short string costs disproportionate "
+            "CPU (catastrophic backtracking)."
+        ),
+        "core": ["1333"],
+        "extended": ["407"],
+    },
+    "dos": {
+        "code": "DOS",
+        "group": "Availability",
+        "label": "Denial of Service / Resource Exhaustion",
+        "description": (
+            "Attacker-controlled input drives unbounded memory, CPU, disk or "
+            "recursion, or reaches a crash path, making the service unavailable. "
+            "Excludes regex-specific cases, which are ReDoS."
+        ),
+        "core": ["400", "770"],
+        "extended": ["409", "674", "789", "405", "834", "617"],
+    },
+
+    # ---- Broad ------------------------------------------------------------
+    "inputval": {
+        "code": "INPUT",
+        "group": "Broad / umbrella",
+        "label": "Improper Input Validation (umbrella)",
+        "description": (
+            "Deliberately broad: advisories tagged only with CWE-20 and its "
+            "children, where the report does not identify a more specific class. "
+            "Expect noise and rely on the AI pass to name the real root cause."
+        ),
+        "core": ["20"],
+        "extended": ["1284", "129", "704"],
     },
 }
 
@@ -164,6 +433,52 @@ KEYWORDS: dict[str, list[str]] = {
                       "arbitrary file write", "file disclosure", "zip slip", "arbitrary file"],
     "deserialization": ["deserializ", "unsafe deserialization", "object injection", "unmarshal"],
     "xxe": ["xxe", "xml external entity", "external entity"],
+    "queryinj": ["ldap injection", "xpath injection", "xquery injection", "xml injection",
+                 "ldap query", "xpath expression"],
+    "crlf": ["crlf", "carriage return", "http response splitting", "header injection",
+             "log injection", "request smuggling", "log forging"],
+    "protopollution": ["prototype pollution", "__proto__", "prototype chain",
+                       "object prototype", "constructor.prototype"],
+    "csrf": ["csrf", "xsrf", "cross-site request forgery", "cross site request forgery",
+             "samesite", "anti-csrf", "state-changing request"],
+    "cors": ["cors", "cross-origin", "cross origin", "access-control-allow-origin",
+             "origin validation", "permissive cross-domain", "null origin"],
+    "session": ["session fixation", "session expiration", "session token", "session id",
+                "session identifier", "persistent cookie", "does not invalidate",
+                "after logout"],
+    "hardcodedcreds": ["hard-coded", "hardcoded", "hard coded", "default credential",
+                       "default password", "embedded credential", "static key"],
+    "clickjacking": ["clickjack", "ui redress", "x-frame-options", "frame-ancestors",
+                     "frame ancestors", "iframe"],
+    "openredirect": ["open redirect", "url redirection", "unvalidated redirect",
+                     "redirect to untrusted", "arbitrary redirect"],
+    "upload": ["unrestricted upload", "arbitrary file upload", "file upload", "webshell",
+               "dangerous file type", "upload of a file"],
+    "searchpath": ["search path", "dll hijack", "dll injection", "untrusted search",
+                   "library hijack", "loads a library", "preload"],
+    "crypto": ["cryptograph", "weak hash", "md5", "sha-1", "sha1", "broken cipher",
+               "signature verification", "certificate validation", "certificate check",
+               "improper verification", "ecb mode", "padding oracle"],
+    "randomness": ["insecure random", "weak random", "insufficiently random",
+                   "predictable", "math.random", "prng", "weak prng", "predictable token"],
+    "infoleak": ["information disclosure", "information leak", "info leak",
+                 "sensitive information", "exposure of sensitive", "leaks the",
+                 "discloses", "leaked in logs"],
+    "memory": ["out-of-bounds", "out of bounds", "use after free", "use-after-free",
+               "double free", "null pointer", "null dereference", "buffer overflow",
+               "buffer over-read", "heap overflow", "stack overflow", "memory corruption",
+               "segmentation fault", "type confusion", "uninitialized memory"],
+    "intoverflow": ["integer overflow", "integer underflow", "integer wraparound",
+                    "wraparound", "signedness", "truncation of", "overflows"],
+    "race": ["race condition", "toctou", "time-of-check", "time of check", "data race",
+             "concurrent access", "not thread-safe", "deadlock"],
+    "redos": ["redos", "regular expression denial", "catastrophic backtracking",
+              "inefficient regular expression", "regex denial", "exponential backtracking"],
+    "dos": ["denial of service", "dos attack", "resource exhaustion", "out of memory",
+            "memory exhaustion", "cpu exhaustion", "infinite loop", "unbounded",
+            "uncontrolled recursion", "stack exhaustion", "decompression bomb", "panic"],
+    "inputval": ["improper input validation", "input validation", "insufficient validation",
+                 "unvalidated input", "does not validate"],
 }
 
 

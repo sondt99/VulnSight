@@ -20,6 +20,8 @@ from modules import nvd_client
 from modules import osv_client
 from samples import NVD_VULN, OSV_GHSA, SAMPLE, SORT_A, SORT_B, SORT_C, make_sortable_raw
 
+import app as app_module
+
 
 class TestFlaskApp(unittest.TestCase):
     def setUp(self):
@@ -341,7 +343,8 @@ class TestFlaskApp(unittest.TestCase):
             "direction", "type", "auto-btn", "search-btn",
             "cwe-search", "cwe-clear", "cwe-options", "selected-chips",
             "selection-count", "selection-live",
-            "history-section", "history-list", "history-clear",
+            "history-section", "history-list", "history-clear", "stale-banner",
+            "class-search", "class-count", "taxonomy-list", "taxonomy-empty",
             "summary", "ai-btn", "retry-btn", "only_match", "export-btn",
             "results", "ai-test-pill", "filters-toggle", "filters-close",
             "filter-scrim",
@@ -354,6 +357,12 @@ class TestFlaskApp(unittest.TestCase):
             self.assertIn(f'name="{name}"', html)
         # The CWE catalog is fetched from /api/cwes, never inlined in the page.
         self.assertNotIn("cwe_catalog", html)
+        # Screen-reader landmarks: one h1, and no aria-label stranded on a bare
+        # <div> (role=generic drops the label).
+        self.assertEqual(html.count("<h1"), 1)
+        for labelled_div in ('class="system-status"', 'class="rail-stats"', 'class="threat-key"'):
+            index = html.index(labelled_div)
+            self.assertIn('role="group"', html[index - 40:index + 80], labelled_div)
         self.assertLess(len(html), 60000, "index page should stay lean")
         for export_format in ("csv", "json", "csv-matches"):
             self.assertIn(f'data-fmt="{export_format}"', html)
@@ -413,6 +422,45 @@ class TestFlaskApp(unittest.TestCase):
         body = r.get_json()
         self.assertEqual(body["categories"], ["cwe:1321", "bac"])
         self.assertEqual(body["missing"], ["GHSA-x"])
+
+    def test_classify_rejects_over_budget_fan_out(self):
+        """categories × advisories is the real cost; cap the product, not each."""
+        from modules.cwe_categories import picker_catalog
+
+        real_cwes = [f"cwe:{row[0]}" for row in picker_catalog()["rows"][:30]]
+        advisory_ids = [f"GHSA-x-{i}" for i in range(30)]
+        cfg = ai_classifier.AIConfig("anthropic", "https://x", ["tok"], "PRO")
+        with mock.patch("modules.ai_classifier.load_config", return_value=cfg):
+            r = self.client.post(
+                "/api/ai/classify",
+                json={"categories": real_cwes, "advisory_ids": advisory_ids},
+            )
+        self.assertEqual(r.status_code, 400)
+        error = r.get_json()["error"]
+        self.assertIn("900", error)
+        self.assertIn(str(app_module.MAX_AI_CALLS_PER_REQUEST), error)
+
+    def test_classify_allows_fan_out_within_budget(self):
+        from modules.cwe_categories import picker_catalog
+
+        real_cwes = [f"cwe:{row[0]}" for row in picker_catalog()["rows"][:10]]
+        cfg = ai_classifier.AIConfig("anthropic", "https://x", ["tok"], "PRO")
+        with mock.patch("modules.ai_classifier.load_config", return_value=cfg), \
+                mock.patch("modules.cache.get_advisory", return_value=None):
+            r = self.client.post(
+                "/api/ai/classify",
+                json={"categories": real_cwes,
+                      "advisory_ids": [f"GHSA-x-{i}" for i in range(20)]},
+            )
+        self.assertEqual(r.status_code, 200)
+
+    def test_index_exposes_the_ai_call_budget_to_the_client(self):
+        """The UI sizes its batches from this, so it must be in BOOT."""
+        with mock.patch("modules.ghsa_client.gh_auth_ok", return_value=False):
+            html = self.client.get("/").get_data(as_text=True)
+        self.assertIn(
+            f"AI_CALL_BUDGET: {app_module.MAX_AI_CALLS_PER_REQUEST}", html
+        )
 
     def test_classify_rejects_malformed_cwe_pseudo_category(self):
         r = self.client.post(
