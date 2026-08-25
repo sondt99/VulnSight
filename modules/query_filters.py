@@ -17,16 +17,28 @@ _DATE_FILTER_RE = re.compile(
 
 
 def parse_timestamp(value: str | None) -> datetime | None:
-    """Parse an ISO-8601 timestamp, accepting a plain YYYY-MM-DD date."""
+    """Parse an ISO-8601 timestamp, accepting a plain YYYY-MM-DD date.
+
+    A timestamp with no offset is read as UTC, not as host-local time.  NVD's
+    API v2 returns naive timestamps (``2024-04-11T20:15:07.253``) that are
+    documented as UTC, while GHSA and OSV send an explicit ``Z``.  Letting
+    ``astimezone()`` apply the machine's offset to the naive form would shift
+    NVD records by hours and silently drop the ones near a day boundary from
+    every date filter — on a UTC+07 host, the same instant matched from GHSA
+    and missed from NVD.
+    """
     if not value:
         return None
     value = str(value).strip()
     try:
         if len(value) == 10:
             return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (TypeError, ValueError, OverflowError):
         return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def valid_published_filter(value: str | None) -> bool:

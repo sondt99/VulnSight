@@ -34,6 +34,26 @@ class TestCommonFilters(unittest.TestCase):
     def test_missing_date_does_not_pass_a_date_filter(self):
         self.assertFalse(query_filters.matches_published({}, ">=2026-01-01"))
 
+    def test_naive_timestamp_is_read_as_utc_not_local_time(self):
+        """NVD API v2 sends naive UTC timestamps; GHSA and OSV send an offset.
+
+        Reading the naive form as host-local time shifted NVD records by the
+        machine's UTC offset and silently dropped the ones near a day boundary
+        from every date filter — the same instant matched from GHSA and missed
+        from NVD on any host that is not itself UTC.
+        """
+        naive = {"published_at": "2026-01-01T05:30:00.000"}   # NVD shape
+        explicit = {"published_at": "2026-01-01T05:30:00Z"}   # GHSA / OSV shape
+        for record in (naive, explicit):
+            with self.subTest(published_at=record["published_at"]):
+                self.assertTrue(
+                    query_filters.matches_published(record, ">=2026-01-01"))
+                self.assertTrue(
+                    query_filters.matches_published(record, "2026-01-01..2026-01-01"))
+        # An explicit offset is still honoured: 05:30+09:00 is 2025-12-31 UTC.
+        self.assertFalse(query_filters.matches_published(
+            {"published_at": "2026-01-01T05:30:00+09:00"}, ">=2026-01-01"))
+
     def test_invalid_calendar_dates_and_ranges_are_rejected(self):
         invalid = (
             "2026-02-30",
