@@ -18,6 +18,25 @@ from modules import nvd_client
 from modules import search_service
 from samples import NVD_VULN, SAMPLE, SORT_A, SORT_B, SORT_C, make_sortable_raw
 
+# EPSS enrichment runs inside run_search, and nothing was mocking it, so the
+# "offline" suite made 12 live DNS lookups to api.first.org per run. It passed
+# only because epss_client swallows every failure — which also meant these
+# tests would pass identically if EPSS enrichment were entirely broken.
+# Individual tests that patch fetch_epss themselves still win: an inner
+# mock.patch takes precedence over this one.
+_epss_patch = None
+
+
+def setUpModule():
+    global _epss_patch
+    _epss_patch = mock.patch("modules.epss_client.fetch_epss", return_value={})
+    _epss_patch.start()
+
+
+def tearDownModule():
+    if _epss_patch is not None:
+        _epss_patch.stop()
+
 
 class TestParseStrList(unittest.TestCase):
     def test_comma_string(self):
@@ -257,6 +276,29 @@ class TestMergeAdvisories(unittest.TestCase):
         merged = search_service.merge_advisories([real, duplicate])
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0]["advisory_id"], "GHSA-5vjc-qx43-r747")
+
+    def test_cvss_vector_survives_the_merge(self):
+        """Only OSV produces it, and GHSA always wins as the base record.
+
+        A v4-only advisory has the vector *instead of* a score, so dropping it
+        left cvss_score null with nothing to look up.
+        """
+        osv = {"advisory_id": "GHSA-x", "ghsa_id": "GHSA-x", "cve_id": "CVE-1",
+               "source": "osv", "cvss_score": None,
+               "cvss_vector": "CVSS:4.0/AV:N/AC:L/VC:H/VI:H/VA:H"}
+        ghsa = {"advisory_id": "GHSA-x", "ghsa_id": "GHSA-x", "cve_id": "CVE-1",
+                "source": "ghsa", "cvss_score": 7.5}
+        merged = search_service.merge_advisories([osv, ghsa])[0]
+        self.assertEqual(merged["source"], "ghsa")   # base is still GHSA
+        self.assertEqual(merged["cvss_vector"], "CVSS:4.0/AV:N/AC:L/VC:H/VI:H/VA:H")
+
+    def test_cvss_vector_is_always_present_even_when_no_source_has_one(self):
+        """The key exists on every merged record, so a client can rely on it."""
+        ghsa = {"advisory_id": "GHSA-y", "ghsa_id": "GHSA-y", "source": "ghsa",
+                "cvss_score": 7.5}
+        merged = search_service.merge_advisories([ghsa])[0]
+        self.assertIn("cvss_vector", merged)
+        self.assertIsNone(merged["cvss_vector"])
 
     def test_aliases_keep_the_publisher_casing(self):
         """GHSA ids are lowercase base32; an upper-cased alias no longer resolves."""

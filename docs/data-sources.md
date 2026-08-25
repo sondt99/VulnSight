@@ -115,11 +115,25 @@ fabricated measurement.
 supply a number already, and that number is used as-is.
 
 **CVSS v4.0 vectors are not scored.** Scoring v4 requires the ~270-entry
-MacroVector table from the specification; the approximation that used to stand
+MacroVector table from the specification. The approximation that used to stand
 in for it ignored `PR`, `UI` and `AT` and took the maximum over all six CIA
-sub-metrics, so vectors whose true scores are 9.3, 8.6 and **5.1** all came out
-as **10.0 critical**. A confidently wrong severity is worse than none in a tool
-that decides what you look at, so it was removed rather than tuned.
+sub-metrics, so subsequent-system impact counted the same as vulnerable-system
+impact.
+
+How wrong it was, measured rather than argued. Every v4-only record in the
+cached exports carries the publisher's own qualitative severity, which gives
+1,104 cases to check the approximation against:
+
+| Approximation vs. publisher | Records |
+|---|---|
+| agreed | 442 (40%) |
+| **overstated** | **650 (59%)** |
+| understated | 12 (1%) |
+
+The overstatements were not marginal: 351 records went `high` → `critical` and
+122 went `medium` → `critical`. In a tool that decides which vulnerabilities a
+person looks at, that is the expensive direction to be wrong in — `critical`
+gets triaged, `unknown` gets checked. So it was removed rather than tuned.
 
 Nothing is lost by that. Measured over the cached Go and Maven exports (15,686
 records):
