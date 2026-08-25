@@ -10,9 +10,10 @@ original unversioned one. **Scripts should use `/api/v1/`** — that is the path
 whose response shape is held stable.
 
 The unversioned aliases — `/api/meta`, `/api/cwes`, `/api/osv/status`,
-`/api/search`, `/api/ai/classify`, `/api/ai/test` — are kept indefinitely, with
-no deprecation planned. The UI still uses them. Both spellings hit the same
-handler, share the same rate-limit bucket, and return byte-identical payloads.
+`/api/search`, `/api/jobs`, `/api/jobs/<job_id>`, `/api/ai/classify`,
+`/api/ai/test` — are kept indefinitely, with no deprecation planned. The UI
+still uses them. Both spellings hit the same handler, share the same rate-limit
+bucket, and return byte-identical payloads.
 
 ## Conventions
 
@@ -25,7 +26,12 @@ handler, share the same rate-limit bucket, and return byte-identical payloads.
   [rate limiting](configuration.md#rate-limiting).
 - If `VULNSIGHT_API_TOKEN` is set, every mutating `/api/*` call needs
   `X-VulnSight-Token: <token>` (or `Authorization: Bearer <token>`). `GET`
-  endpoints are unauthenticated — they expose only public reference data.
+  endpoints are unauthenticated — they expose only public reference data — with
+  one exception: [`GET /api/v1/jobs/<job_id>`](#get-apiv1jobsjob_id) is guarded,
+  because a job result is your query's output rather than reference data.
+- Every `/api/` failure is JSON, including ones no handler produced: a wrong
+  path is `404 {"error": "No such endpoint."}`, not a Werkzeug HTML page. Pages
+  outside `/api/` still render HTML, since a browser is not a script.
 
 ---
 
@@ -155,6 +161,74 @@ Errors: `Select at least one bug class or CWE.` ·
 `Unsupported categories: cwe:99999999` · `Unsupported ecosystem: …` ·
 `Invalid published filter: …` · `GHSA fetch failed.` (502, only when it was the
 sole source).
+
+## `POST /api/v1/jobs`
+
+Runs the same search off the request thread. Takes **exactly** the body
+`/api/v1/search` takes, so moving a slow query across is a URL change and
+nothing else.
+
+Use it when the query includes NVD. NVD without an API key costs ~6.5 s per CWE
+in rate-limit sleeps, and a class with extended CWEs enabled resolves to well
+over a hundred — minutes of wall clock, past the default timeout of most HTTP
+clients. The query is not slow so much as un-completable over one connection.
+
+```
+202 Accepted
+Location: /api/v1/jobs/9f3c1ab2e4d5c6b7a8f90123
+```
+```json
+{"job_id": "9f3c1ab2e4d5c6b7a8f90123", "kind": "search",
+ "status": "queued", "poll": "/api/v1/jobs/9f3c1ab2e4d5c6b7a8f90123"}
+```
+
+The query is validated before the job is created, so a malformed request is a
+`400` you get now rather than a job that fails a minute later. Submitting spends
+the **same** rate-limit bucket as `/api/v1/search` — queueing a search costs the
+same upstream budget as running one.
+
+## `GET /api/v1/jobs/<job_id>`
+
+```jsonc
+{
+  "job_id": "9f3c1ab2e4d5c6b7a8f90123",
+  "kind": "search",
+  "status": "queued",        // queued | running | done | failed
+  "created_at": 1756000000.0,
+  "started_at": 1756000001.2,
+  "finished_at": 1756000118.9,
+  "result": { /* identical to a POST /api/v1/search response */ },
+  "error": "GHSA fetch failed."   // present only when status is "failed"
+}
+```
+
+`result` appears only on `done`, `error` only on `failed` — there are no partial
+results to poll for. The payload under `result` is byte-identical to what the
+synchronous endpoint returns, so a client never parses two shapes.
+
+Unlike every other `GET`, this one **requires the token when one is configured**.
+The other read endpoints serve public reference data; a job result is the output
+of your own query, and a 96-bit id should not be the only thing protecting it.
+
+Unknown or malformed ids return `404 {"error": "No such job."}`.
+
+### Limits worth knowing before you build on this
+
+- **No cancellation.** Python cannot interrupt a thread parked in `time.sleep`,
+  and the fetch loop has no cancellation points. A running job runs to
+  completion or until the process exits.
+- **Execution is pinned to the process that accepted the job.** The worker pool
+  is in-process; job rows are shared, so polling works from any worker, but with
+  gunicorn `--workers` above 1 the work only runs where it was submitted. The
+  shipped `Dockerfile` uses one worker, so this is only a concern if you change it.
+- **A restart fails in-flight jobs.** They are marked `failed` with
+  `Server restarted while this job was in flight; resubmit it.` rather than left
+  in `running` forever, because nothing is executing them any more.
+- **One worker by default** (`VULNSIGHT_JOB_WORKERS`). The sources are rate
+  limited per account, not per request, so running searches concurrently spends
+  the same GitHub and NVD budget faster without finishing any job sooner.
+- **Finished jobs are pruned** after `VULNSIGHT_JOB_RETENTION` seconds
+  (default 24 h). Unfinished jobs are never pruned.
 
 ## `POST /api/v1/ai/classify`
 

@@ -64,6 +64,24 @@ _MIGRATIONS = [
         "   SET data = json_set(data, '$.advisory_id', advisory_id)"
         " WHERE json_valid(data)"
         "   AND COALESCE(json_extract(data, '$.advisory_id'), '') = ''"),
+    # v5: background jobs. A search that spans NVD spends minutes in rate-limit
+    # sleeps, which is longer than any default HTTP client timeout, so it has to
+    # be submittable and pollable rather than held open on a socket. Stored
+    # rather than kept in memory so a job orphaned by a restart is still
+    # observable — and can be reported failed instead of hanging in `running`.
+    (5, """CREATE TABLE IF NOT EXISTS jobs (
+               job_id      TEXT PRIMARY KEY,
+               kind        TEXT NOT NULL,
+               status      TEXT NOT NULL,      -- queued|running|done|failed
+               request     TEXT NOT NULL,      -- the submitted body, as JSON
+               result      TEXT,               -- payload as JSON when done
+               error       TEXT,               -- operator-facing message
+               error_status INTEGER,           -- HTTP status the error maps to
+               created_at  REAL NOT NULL,
+               started_at  REAL,
+               finished_at REAL
+           );
+           CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at)"""),
 ]
 
 
@@ -209,6 +227,98 @@ def save_classification(
                 time.time(),
             ),
         )
+
+
+def _job_row_to_dict(row: sqlite3.Row) -> dict:
+    return {
+        "job_id": row["job_id"],
+        "kind": row["kind"],
+        "status": row["status"],
+        "request": json.loads(row["request"]) if row["request"] else None,
+        "result": json.loads(row["result"]) if row["result"] else None,
+        "error": row["error"],
+        "error_status": row["error_status"],
+        "created_at": row["created_at"],
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
+    }
+
+
+def create_job(job_id: str, kind: str, request: dict, path: str | None = None) -> None:
+    with _db(path) as conn:
+        conn.execute(
+            """INSERT INTO jobs (job_id, kind, status, request, created_at)
+               VALUES (?,?,'queued',?,?)""",
+            (job_id, kind, json.dumps(request, ensure_ascii=False), time.time()),
+        )
+
+
+def mark_job_running(job_id: str, path: str | None = None) -> None:
+    with _db(path) as conn:
+        conn.execute(
+            "UPDATE jobs SET status='running', started_at=? WHERE job_id=?",
+            (time.time(), job_id),
+        )
+
+
+def finish_job(
+    job_id: str,
+    *,
+    result: dict | None = None,
+    error: str | None = None,
+    error_status: int | None = None,
+    path: str | None = None,
+) -> None:
+    status = "failed" if error is not None else "done"
+    with _db(path) as conn:
+        conn.execute(
+            """UPDATE jobs
+                  SET status=?, result=?, error=?, error_status=?, finished_at=?
+                WHERE job_id=?""",
+            (
+                status,
+                json.dumps(result, ensure_ascii=False) if result is not None else None,
+                error,
+                error_status,
+                time.time(),
+                job_id,
+            ),
+        )
+
+
+def get_job(job_id: str, path: str | None = None) -> dict | None:
+    with _db(path) as conn:
+        row = conn.execute(
+            "SELECT * FROM jobs WHERE job_id=?", (job_id,)
+        ).fetchone()
+    return _job_row_to_dict(row) if row else None
+
+
+def fail_orphaned_jobs(message: str, path: str | None = None) -> int:
+    """Fail jobs left mid-flight by a dead process.
+
+    Nothing is executing them any more — the worker pool lives in the process
+    that died — so leaving them `queued`/`running` would strand every poller
+    forever on a job that can never finish.
+    """
+    with _db(path) as conn:
+        cursor = conn.execute(
+            """UPDATE jobs
+                  SET status='failed', error=?, error_status=503, finished_at=?
+                WHERE status IN ('queued','running')""",
+            (message, time.time()),
+        )
+        return cursor.rowcount or 0
+
+
+def prune_jobs(max_age_seconds: float, path: str | None = None) -> int:
+    """Drop finished jobs older than *max_age_seconds*; unfinished ones stay."""
+    with _db(path) as conn:
+        cursor = conn.execute(
+            "DELETE FROM jobs WHERE finished_at IS NOT NULL AND finished_at < ?",
+            (time.time() - max_age_seconds,),
+        )
+        return cursor.rowcount or 0
 
 
 def get_classifications(
