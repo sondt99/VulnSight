@@ -166,11 +166,16 @@ Response:
 ```
 
 Each result carries `advisory_id`, `ghsa_id`, `cve_id`, `aliases`, `sources`,
-`source_records`, `severity` and `severity_by_source`, `cvss_score` and
-`cvss_by_source`, `cwes`, `cwe_labels`, `packages`, `ecosystems`, `published_at`,
+`source_records`, `severity` and `severity_by_source`, `cvss_score`,
+`cvss_vector` and `cvss_by_source`, `cwes`, `cwe_labels`, `packages`, `ecosystems`, `published_at`,
 `updated_at`, `withdrawn_at`, `kev`, `epss_percentage`, `epss_percentile`,
 `html_url`, `summary`, `description`, and `ai` when a fresh cached verdict exists
 for **every** requested category.
+
+`cvss_score` is `null` when the advisory's only vector is CVSS v4.0 — v4 is not
+scored here, and the reason is in
+[Data sources](data-sources.md). `severity` is still populated for those, from
+the publisher's own qualitative rating.
 
 `per_source` counts are pre-merge, so they will not sum to `count`. That gap
 used to be unexplainable from the response — a smaller `count` could mean rows

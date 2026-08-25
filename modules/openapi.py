@@ -143,7 +143,18 @@ _ADVISORY = {
                      "enum": ["unknown", "low", "medium", "high", "critical"]},
         "severity_by_source": {"type": "object",
                                "additionalProperties": {"type": "string"}},
-        "cvss_score": {"type": "number", "nullable": True},
+        "cvss_score": {
+            "type": "number", "nullable": True,
+            "description": (
+                "Null for an advisory whose only vector is CVSS v4.0: v4 is "
+                "not scored here, and a wrong number is worse than none. Use "
+                "cvss_vector to score it yourself."
+            ),
+        },
+        "cvss_vector": {
+            "type": "string", "nullable": True,
+            "description": "The vector cvss_score came from, or the v4 vector when unscored.",
+        },
         "cvss_by_source": {"type": "object",
                            "additionalProperties": {"type": "number"}},
         "cwes": {"type": "array", "items": {"type": "string"}},
