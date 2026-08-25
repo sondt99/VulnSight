@@ -1066,7 +1066,7 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "839": ('Signed comparison',),
     "843": ('Object Type Confusion',),
     "862": ('AuthZ', 'BFLA',),
-    "863": ('AuthZ', 'BOLA', 'IDOR',),
+    "863": ('AuthZ',),
     "910": ('Stale file descriptor',),
     "915": ('Mass Assignment', 'AutoBinding', 'PHP Object Injection',),
     "917": ('EL Injection',),

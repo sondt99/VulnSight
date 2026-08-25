@@ -44,7 +44,11 @@ EXTRA_ALIASES: dict[str, tuple[str, ...]] = {
     "601": ("open redirect",),
     "611": ("XXE",),
     "862": ("BFLA", "missing authorization"),
-    "863": ("BOLA", "IDOR"),
+    # BOLA and IDOR belong to CWE-639, which MITRE already tags with both in
+    # its own Alternate_Terms; adding them here scored 863 as an exact alias
+    # hit alongside 639, so searching "IDOR" surfaced the wrong weakness at
+    # the same rank as the right one. 863 keeps only the generic term.
+    "863": ("AuthZ",),
     "918": ("SSRF",),
     "1321": ("prototype pollution",),
     "1336": ("SSTI", "template injection"),
