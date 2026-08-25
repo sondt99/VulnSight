@@ -68,15 +68,16 @@ Needs Python 3.9+ and the [`gh` CLI](https://cli.github.com/) authenticated
 | [Data sources](docs/data-sources.md) | GHSA / NVD / OSV / OSV-native, and honest coverage limits |
 | [AI classification](docs/ai-classification.md) | Prompt, verdict cache, key rotation, cost controls |
 | [HTTP API](docs/api.md) | Every endpoint, request and response shape |
+| [Scripting and CI](docs/automation.md) | Driving it from cron or a pipeline, and what will bite you |
 | [Architecture](docs/architecture.md) | Module map and the search pipeline end to end |
-| [Testing](docs/testing.md) | 270 offline tests + 21 browser tests, and how to verify a change |
+| [Testing](docs/testing.md) | 311 offline tests + 21 browser tests, and how to verify a change |
 | [Operations](docs/operations.md) | Exposure, caches, quotas, troubleshooting |
 | [SECURITY.md](SECURITY.md) | Threat model and how to report a vulnerability |
 
 ## Tests
 
 ```bash
-.venv/bin/python -m unittest discover -s tests    # 270 tests, offline, no credentials
+.venv/bin/python -m unittest discover -s tests    # 332 tests; 311 need no credentials
 ```
 
 The 21 browser tests in `tests/test_ui_e2e.py` skip themselves unless Playwright

@@ -61,10 +61,23 @@ Applies to `POST` only, per client address.
 |---|---|---|
 | `VULNSIGHT_RATE_LIMIT` | `on` | `0`/`off`/`false`/`no` disables limiting entirely |
 | `VULNSIGHT_RATE_WINDOW` | `60` s | Window length |
-| `VULNSIGHT_SEARCH_RATE` | `30` | `/api/search` calls per window |
+| `VULNSIGHT_SEARCH_RATE` | `30` | `/api/search` **and** `/api/jobs` calls per window — they share one bucket, since queueing a search costs the same upstream budget as running one |
 | `VULNSIGHT_AI_RATE` | `20` | `/api/ai/classify` and `/api/ai/test` calls per window |
+| `VULNSIGHT_TRUST_PROXY` | unset | Read the client address from the first `X-Forwarded-For` entry. Only set this where a proxy you control writes that header: it is client-supplied otherwise, and one caller can mint unlimited buckets with it. Left unset, everyone behind a proxy shares its address |
 
-A throttled request gets `429` with `Retry-After`.
+A throttled request gets `429` with `Retry-After`. The limiter runs *after*
+authentication, so requests rejected for a bad token spend nothing — an
+unauthenticated caller cannot exhaust the operator's budget.
+
+## Background jobs
+
+`POST /api/v1/jobs` runs a search off the request thread. See
+[Scripting and CI](automation.md#choose-sync-or-async-by-whether-nvd-is-in-the-query).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `VULNSIGHT_JOB_WORKERS` | `1` | Jobs run concurrently, clamped to 1–8. One by default because the sources are rate limited per *account*, not per request, so concurrency spends the same GitHub and NVD budget faster without finishing anything sooner |
+| `VULNSIGHT_JOB_RETENTION` | `86400` s | How long a finished job's row is kept. Unfinished jobs are never pruned |
 
 ## Fixed limits (code, not environment)
 
