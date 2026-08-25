@@ -266,13 +266,17 @@ def _merge_group(records: list[dict]) -> dict:
         source_records.setdefault(source, []).append(snapshot)
     merged["source_records"] = source_records
 
-    identifiers = set().union(*(_record_identifiers(record) for record in records))
-    merged["aliases"] = sorted(identifiers)
-    identifier_values = [
-        identifier
-        for record in records
-        for identifier in _record_identifier_values(record)
-    ]
+    # Dedupe case-insensitively but publish the identifier as its source wrote
+    # it: GHSA ids are lowercase base32, and an upper-cased alias no longer
+    # resolves against the GitHub API or a permalink.
+    identifier_values: list[str] = []
+    seen_identifiers: set[str] = set()
+    for record in records:
+        for identifier in _record_identifier_values(record):
+            if identifier.upper() not in seen_identifiers:
+                seen_identifiers.add(identifier.upper())
+                identifier_values.append(identifier)
+    merged["aliases"] = sorted(identifier_values, key=str.upper)
     ghsa_ids = sorted(
         (identifier for identifier in identifier_values if identifier.upper().startswith("GHSA-")),
         key=str.upper,
@@ -341,7 +345,11 @@ def _merge_group(records: list[dict]) -> dict:
     published = [record.get("published_at") for record in records if record.get("published_at")]
     updated = [record.get("updated_at") for record in records if record.get("updated_at")]
     withdrawn = [record.get("withdrawn_at") for record in records if record.get("withdrawn_at")]
-    merged["published_at"] = min(published) if published else None
+    # Keep the base advisory's own publication date.  min() across sources
+    # backdates a 2025 GHSA advisory to its 2019 CVE, which then sorts and
+    # displays under a year in which that advisory did not yet exist.  Every
+    # source's own date stays available under source_records.
+    merged["published_at"] = base.get("published_at") or (min(published) if published else None)
     merged["updated_at"] = max(updated) if updated else None
     merged["withdrawn_at"] = max(withdrawn) if withdrawn else None
     merged["kev"] = any(bool(record.get("kev")) for record in records)
@@ -354,7 +362,27 @@ def _merge_group(records: list[dict]) -> dict:
 
 
 def merge_advisories(collected: list[dict]) -> list[dict]:
-    """Dedupe by the full alias graph and preserve source-specific metadata."""
+    """Dedupe by the full alias graph and preserve source-specific metadata.
+
+    Bridging on a shared *CVE* looks unsafe in theory — a CVE names a
+    vulnerability, and GitHub mints one GHSA per affected package, so four
+    advisories can carry one CVE.  Measured against the cached exports
+    (242,566 records: npm + Go + Maven) it is safe in practice, and a guard
+    against it is actively harmful:
+
+    - Where GitHub does split a CVE across packages, the records cross-declare
+      each other in ``aliases`` (all four advisories behind CVE-2020-29242 list
+      the other three), so they merge on advisory identifiers regardless.
+    - CVE-only bridges between two records that each carry their own advisory
+      id occur 8 times in that corpus, and all 8 are GitHub "Duplicate
+      Advisory" pairs that must merge — including one package rename
+      (fuxa-server / @frangoteam/fuxa) whose package sets are disjoint.
+
+    A guard that skipped those bridges scored 0 correct splits against 8
+    regressions, so the alias graph is deliberately left transitive.  Revisit
+    only with counter-evidence from a corpus that contains a genuine
+    per-package split with no reciprocal alias.
+    """
     if not collected:
         return []
 
@@ -388,6 +416,34 @@ def merge_advisories(collected: list[dict]) -> list[dict]:
             order.append(root)
         groups[root].append(record)
     return [_merge_group(groups[root]) for root in order]
+
+
+def _group_matches_filters(
+    record: dict,
+    *,
+    published: str | None = None,
+    affects: str | None = None,
+    severity: str | None = None,
+) -> bool:
+    """Keep a merged record when any single source's record matches the query.
+
+    _merge_group deliberately widens severity to the maximum across sources, so
+    filtering the merged value would drop an advisory the moment a second source
+    disagreed: a GHSA record tagged `high` survived a `severity=high` search on
+    its own and vanished as soon as NVD called the same CVE `critical`.  Adding
+    a source must never subtract results.
+    """
+    candidates = [
+        source_record
+        for source_group in (record.get("source_records") or {}).values()
+        for source_record in source_group
+    ] or [record]
+    return any(
+        matches_common_filters(
+            candidate, published=published, affects=affects, severity=severity
+        )
+        for candidate in candidates
+    )
 
 
 def run_search(q: SearchQuery) -> SearchOutcome:
@@ -487,7 +543,7 @@ def run_search(q: SearchQuery) -> SearchOutcome:
     results = merge_advisories(collected)
     results = [
         record for record in results
-        if matches_common_filters(
+        if _group_matches_filters(
             record,
             published=q.published,
             affects=q.affects,

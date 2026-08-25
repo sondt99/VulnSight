@@ -68,8 +68,14 @@ apply. All styling must go through `static/style.css`.
    (`advisory_id`, `cve_id`, `ghsa_id`, `osv_id`, `aliases`). GHSA wins as the
    base record; every source's snapshot is kept under `source_records`, severity
    and CVSS are kept per source, and the highest of each is promoted.
-5. **Re-filter** — `published` / `affects` / `severity` are enforced again on the
-   normalized records, so a fuzzier server-side filter cannot leak rows through.
+   `published_at` is the *base advisory's* own date — promoting the earliest
+   across sources backdated a 2026 advisory to its 2021 CVE.
+5. **Re-filter** — `published` / `affects` / `severity` are enforced again, so a
+   fuzzier server-side filter cannot leak rows through. The test runs against
+   *each source's* record, not the merged one: the merge promotes the highest
+   severity, so filtering the merged value would drop a `high` GHSA advisory the
+   moment NVD called the same CVE `critical`. Adding a source never subtracts
+   results.
 6. **Sort, truncate, enrich** — in that order for non-EPSS sorts, which keeps
    EPSS to one batched request instead of one per 100 pre-truncation records.
    Sorting *by* EPSS necessarily enriches before sorting.

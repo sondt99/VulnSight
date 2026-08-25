@@ -230,6 +230,66 @@ class TestMergeAdvisories(unittest.TestCase):
         self.assertEqual(len(merged), 1)
         self.assertIn("RUSTSEC-2026-1", merged[0]["aliases"])
 
+    def test_cve_bridges_a_source_with_no_advisory_id(self):
+        """The bridge that matters: an NVD record's only identifier IS the CVE."""
+        ghsa_rec = {"advisory_id": "GHSA-real", "ghsa_id": "GHSA-real",
+                    "cve_id": "CVE-2026-9", "source": "ghsa"}
+        nvd_rec = {"advisory_id": "CVE-2026-9", "ghsa_id": None,
+                   "cve_id": "CVE-2026-9", "source": "nvd"}
+        merged = search_service.merge_advisories([ghsa_rec, nvd_rec])
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["sources"], ["ghsa", "nvd"])
+
+    def test_shared_cve_merges_github_duplicate_advisories(self):
+        """A "Duplicate Advisory" stub shares only the CVE with the real one.
+
+        All 8 CVE-only bridges in the cached npm + Go + Maven exports are this
+        shape, which is why merge_advisories keeps the alias graph transitive.
+        """
+        real = {"advisory_id": "GHSA-5vjc-qx43-r747",
+                "ghsa_id": "GHSA-5vjc-qx43-r747", "cve_id": "CVE-2022-27200",
+                "aliases": ["CVE-2022-27200"], "source": "ghsa",
+                "summary": "Stored Cross-site Scripting in folder-auth plugin"}
+        duplicate = {"advisory_id": "GHSA-chr6-386q-4m3v",
+                     "ghsa_id": "GHSA-chr6-386q-4m3v", "cve_id": "CVE-2022-27200",
+                     "aliases": ["CVE-2022-27200"], "source": "ghsa",
+                     "summary": "Duplicate Advisory: Stored Cross-site Scripting"}
+        merged = search_service.merge_advisories([real, duplicate])
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["advisory_id"], "GHSA-5vjc-qx43-r747")
+
+    def test_aliases_keep_the_publisher_casing(self):
+        """GHSA ids are lowercase base32; an upper-cased alias no longer resolves."""
+        record = {"advisory_id": "GHSA-h3m5-97jq-qjrf",
+                  "ghsa_id": "GHSA-h3m5-97jq-qjrf",
+                  "cve_id": "CVE-2021-44228", "source": "ghsa"}
+        merged = search_service.merge_advisories([record])[0]
+        self.assertIn("GHSA-h3m5-97jq-qjrf", merged["aliases"])
+        self.assertNotIn("GHSA-H3M5-97JQ-QJRF", merged["aliases"])
+
+    def test_published_at_keeps_the_base_advisory_date(self):
+        """min() across sources backdated a 2026 advisory to its 2021 CVE."""
+        ghsa_rec = {"advisory_id": "GHSA-real", "ghsa_id": "GHSA-real",
+                    "cve_id": "CVE-2026-9", "source": "ghsa",
+                    "published_at": "2026-06-25T00:00:00Z"}
+        nvd_rec = {"advisory_id": "CVE-2026-9", "ghsa_id": None,
+                   "cve_id": "CVE-2026-9", "source": "nvd",
+                   "published_at": "2021-12-10T00:00:00Z"}
+        merged = search_service.merge_advisories([ghsa_rec, nvd_rec])[0]
+        self.assertEqual(merged["published_at"], "2026-06-25T00:00:00Z")
+
+    def test_group_matches_filters_uses_each_source_record(self):
+        """severity is widened to max(); filtering that value drops real matches."""
+        ghsa_rec = {"advisory_id": "GHSA-real", "ghsa_id": "GHSA-real",
+                    "cve_id": "CVE-2026-9", "source": "ghsa", "severity": "high"}
+        nvd_rec = {"advisory_id": "CVE-2026-9", "ghsa_id": None,
+                   "cve_id": "CVE-2026-9", "source": "nvd", "severity": "critical"}
+        merged = search_service.merge_advisories([ghsa_rec, nvd_rec])[0]
+        self.assertEqual(merged["severity"], "critical")  # still the worst case
+        self.assertTrue(search_service._group_matches_filters(merged, severity="high"))
+        self.assertTrue(search_service._group_matches_filters(merged, severity="critical"))
+        self.assertFalse(search_service._group_matches_filters(merged, severity="low"))
+
 
 class TestRunSearch(unittest.TestCase):
     def setUp(self):
@@ -391,6 +451,32 @@ class TestRunSearchNvd(unittest.TestCase):
         self.assertEqual(cves.count("CVE-2021-44228"), 1)
         self.assertIn("ghsa", out.results[0]["sources"])
         self.assertIn("nvd", out.results[0]["sources"])
+
+    def test_adding_nvd_does_not_drop_a_filtered_ghsa_match(self):
+        """Adding a source must never subtract results.
+
+        GHSA calls CVE-2021-44228 `high` and published it 2026-06-25; NVD calls
+        it `critical` and published 2021-12-10.  Merging widens severity to the
+        max and used to widen published_at to the min, so both filters dropped
+        the record the moment NVD was switched on.
+        """
+        nvd_normalized = nvd_client.normalize(NVD_VULN)
+        ghsa_raw_rec = dict(SAMPLE, cve_id="CVE-2021-44228")
+        for filters in ({"severity": "high"}, {"published": ">=2026-01-01"}):
+            with self.subTest(**filters):
+                ghsa_only = search_service.parse_search_query(
+                    {"categories": ["bac"], "sources": ["ghsa"], **filters})
+                both = search_service.parse_search_query(
+                    {"categories": ["bac"], "sources": ["ghsa", "nvd"], **filters})
+                with mock.patch("modules.ghsa_client.fetch_advisories",
+                                return_value=[ghsa_raw_rec]), \
+                     mock.patch("modules.nvd_client.fetch_nvd",
+                                return_value=[nvd_normalized]):
+                    alone = search_service.run_search(ghsa_only)
+                    merged = search_service.run_search(both)
+                self.assertEqual(len(alone.results), 1)
+                self.assertEqual(len(merged.results), 1)
+                self.assertEqual(merged.results[0]["sources"], ["ghsa", "nvd"])
 
 
 if __name__ == "__main__":
