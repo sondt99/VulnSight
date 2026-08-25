@@ -678,16 +678,69 @@ class TestAppAuthAndLimits(unittest.TestCase):
         self.assertEqual(second.status_code, 429)
         self.assertEqual(second.headers.get("Retry-After"), "60")
 
-    def test_unauthenticated_posts_are_rate_limited(self):
+    def test_unauthenticated_posts_do_not_consume_the_rate_limit(self):
+        """Auth runs before rate limiting, so a rejected caller spends nothing.
+
+        With the hooks the other way round an unauthenticated flood drained the
+        shared bucket and the operator's own next request — with the right
+        token — came back 429. Every request here is 401; none reaches the
+        limiter, and the authenticated request that follows still succeeds.
+        """
         self._make({
             "VULNSIGHT_API_TOKEN": "secret",
-            "VULNSIGHT_SEARCH_RATE": "1",
+            "VULNSIGHT_SEARCH_RATE": "2",
             "VULNSIGHT_RATE_WINDOW": "60",
         })
-        first = self.client.post("/api/search", json={"categories": ["bac"]})
-        second = self.client.post("/api/search", json={"categories": ["bac"]})
-        self.assertEqual(first.status_code, 401)
+        rejected = [
+            self.client.post("/api/search", json={"categories": ["bac"]}).status_code
+            for _ in range(6)
+        ]
+        self.assertEqual(rejected, [401] * 6)
+        with mock.patch("modules.ghsa_client.fetch_advisories", return_value=[SAMPLE]):
+            operator = self.client.post(
+                "/api/search",
+                json={"categories": ["bac"], "ecosystem": "maven"},
+                headers={"X-VulnSight-Token": "secret"},
+            )
+        self.assertEqual(operator.status_code, 200)
+
+    def test_rate_limit_key_ignores_forwarded_for_by_default(self):
+        """X-Forwarded-For is client-controlled; trusting it mints free buckets."""
+        self._make({"VULNSIGHT_SEARCH_RATE": "1", "VULNSIGHT_RATE_WINDOW": "60"})
+        with mock.patch("modules.ghsa_client.fetch_advisories", return_value=[SAMPLE]):
+            first = self.client.post(
+                "/api/search", json={"categories": ["bac"], "ecosystem": "maven"},
+                headers={"X-Forwarded-For": "1.1.1.1"},
+            )
+            second = self.client.post(
+                "/api/search", json={"categories": ["bac"], "ecosystem": "maven"},
+                headers={"X-Forwarded-For": "2.2.2.2"},
+            )
+        self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 429)
+
+    def test_rate_limit_key_honours_forwarded_for_when_proxy_trusted(self):
+        self._make({
+            "VULNSIGHT_SEARCH_RATE": "1",
+            "VULNSIGHT_RATE_WINDOW": "60",
+            "VULNSIGHT_TRUST_PROXY": "1",
+        })
+        with mock.patch("modules.ghsa_client.fetch_advisories", return_value=[SAMPLE]):
+            first = self.client.post(
+                "/api/search", json={"categories": ["bac"], "ecosystem": "maven"},
+                headers={"X-Forwarded-For": "1.1.1.1"},
+            )
+            other_client = self.client.post(
+                "/api/search", json={"categories": ["bac"], "ecosystem": "maven"},
+                headers={"X-Forwarded-For": "2.2.2.2"},
+            )
+            same_client = self.client.post(
+                "/api/search", json={"categories": ["bac"], "ecosystem": "maven"},
+                headers={"X-Forwarded-For": "1.1.1.1"},
+            )
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(other_client.status_code, 200)  # separate bucket
+        self.assertEqual(same_client.status_code, 429)   # same bucket, exhausted
 
     def test_non_loopback_autogens_token(self):
         data_dir = tempfile.mkdtemp()

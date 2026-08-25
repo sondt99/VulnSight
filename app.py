@@ -104,6 +104,27 @@ def create_app():
             return None
         return jsonify({"error": "Cross-origin request blocked."}), 403
 
+    # Auth is registered before rate limiting, and the order is load-bearing:
+    # Flask runs before_request hooks in registration order, so with it the
+    # other way round an unauthenticated caller spent the operator's own bucket
+    # and locked them out with a 429 while every one of its requests was 401.
+    @app.before_request
+    def _auth_check():
+        if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
+            return None
+        if not request.path.startswith("/api/"):
+            return None
+        expected = app.config.get("VULNSIGHT_TOKEN") or ""
+        if not expected:
+            return None  # auth not configured; token_matches itself fails closed
+        provided = security.extract_request_token(
+            request.headers.get("X-VulnSight-Token"),
+            request.headers.get("Authorization"),
+        )
+        if security.token_matches(expected, provided):
+            return None
+        return jsonify({"error": "Authentication required."}), 401
+
     @app.before_request
     def _rate_limit():
         if request.method != "POST" or not app.config.get("RATE_LIMIT_ENABLED", True):
@@ -115,30 +136,16 @@ def create_app():
             limiter = app.config.get("AI_LIMITER")
         if limiter is None:
             return None
-        if limiter.allow(request.remote_addr or "unknown"):
+        key = security.client_key(
+            request.remote_addr, request.headers.get("X-Forwarded-For")
+        )
+        if limiter.allow(key):
             return None
         retry_after = str(getattr(limiter, "window_seconds", 60))
         response = jsonify({"error": "Too many requests. Try again shortly."})
         response.status_code = 429
         response.headers["Retry-After"] = retry_after
         return response
-
-    @app.before_request
-    def _auth_check():
-        if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
-            return None
-        if not request.path.startswith("/api/"):
-            return None
-        expected = app.config.get("VULNSIGHT_TOKEN") or ""
-        if not expected:
-            return None
-        provided = security.extract_request_token(
-            request.headers.get("X-VulnSight-Token"),
-            request.headers.get("Authorization"),
-        )
-        if security.token_matches(expected, provided):
-            return None
-        return jsonify({"error": "Authentication required."}), 401
 
     @app.before_request
     def create_csp_nonce():
