@@ -20,6 +20,8 @@ import json
 import re
 import shutil
 import subprocess
+import threading
+import time
 from dataclasses import dataclass, field
 from urllib.parse import urlencode, urlsplit
 
@@ -37,7 +39,14 @@ def gh_available() -> bool:
     return shutil.which("gh") is not None
 
 
-def gh_auth_ok() -> bool:
+#: How long a `gh auth status` result is reused. Logging in or out is rare;
+#: rendering a page is not.
+AUTH_CACHE_SECONDS = 300.0
+_auth_cache: tuple[float, bool] | None = None
+_auth_lock = threading.Lock()
+
+
+def _gh_auth_uncached() -> bool:
     if not gh_available():
         return False
     try:
@@ -50,6 +59,40 @@ def gh_auth_ok() -> bool:
         return r.returncode == 0
     except Exception:
         return False
+
+
+def gh_auth_ok(*, force: bool = False) -> bool:
+    """Whether the `gh` CLI is authenticated. Cached for AUTH_CACHE_SECONDS.
+
+    This forks a process and makes an authenticated round trip to GitHub —
+    measured at 639 ms, and again at 626 ms immediately afterwards, because
+    nothing cached it. It is called while rendering `GET /` and `GET
+    /api/meta`, neither of which requires authentication or is rate limited,
+    and the Docker healthcheck hits `/api/meta` every 30 seconds. An
+    unauthenticated caller could therefore spend two thirds of a second of
+    server time, and a slice of the operator's GitHub quota, per request — on
+    endpoints that are otherwise sub-millisecond.
+    """
+    global _auth_cache
+    now = time.monotonic()
+    with _auth_lock:
+        if not force and _auth_cache is not None:
+            cached_at, value = _auth_cache
+            if now - cached_at < AUTH_CACHE_SECONDS:
+                return value
+    # Deliberately outside the lock: the subprocess must not block other
+    # threads, and a duplicated check costs less than serialising every caller.
+    value = _gh_auth_uncached()
+    with _auth_lock:
+        _auth_cache = (time.monotonic(), value)
+    return value
+
+
+def reset_auth_cache() -> None:
+    """Forget the cached result. For tests, and after logging in or out."""
+    global _auth_cache
+    with _auth_lock:
+        _auth_cache = None
 
 
 @dataclass

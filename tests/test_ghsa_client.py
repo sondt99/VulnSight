@@ -124,5 +124,47 @@ class TestRunGhApiHeaderSplit(unittest.TestCase):
         self.assertEqual(next_url, "https://api.github.com/advisories?after=zz")
 
 
+class TestAuthStatusIsCached(unittest.TestCase):
+    """`gh auth status` forks a process and calls GitHub — 639 ms, measured.
+
+    It runs while rendering GET / and GET /api/meta, neither of which is
+    authenticated or rate limited, and the Docker healthcheck hits /api/meta
+    every 30 seconds.
+    """
+
+    def setUp(self):
+        ghsa.reset_auth_cache()
+
+    def tearDown(self):
+        ghsa.reset_auth_cache()
+
+    def test_repeated_calls_fork_once(self):
+        with mock.patch.object(ghsa, "_gh_auth_uncached", return_value=True) as probe:
+            results = [ghsa.gh_auth_ok() for _ in range(20)]
+        self.assertEqual(results, [True] * 20)
+        self.assertEqual(probe.call_count, 1)
+
+    def test_a_negative_result_is_cached_too(self):
+        with mock.patch.object(ghsa, "_gh_auth_uncached", return_value=False) as probe:
+            self.assertFalse(ghsa.gh_auth_ok())
+            self.assertFalse(ghsa.gh_auth_ok())
+        self.assertEqual(probe.call_count, 1)
+
+    def test_force_and_reset_both_bypass_the_cache(self):
+        with mock.patch.object(ghsa, "_gh_auth_uncached", return_value=True) as probe:
+            ghsa.gh_auth_ok()
+            ghsa.gh_auth_ok(force=True)
+            ghsa.reset_auth_cache()
+            ghsa.gh_auth_ok()
+        self.assertEqual(probe.call_count, 3)
+
+    def test_the_cache_expires(self):
+        with mock.patch.object(ghsa, "_gh_auth_uncached", return_value=True) as probe, \
+             mock.patch.object(ghsa, "AUTH_CACHE_SECONDS", 0):
+            ghsa.gh_auth_ok()
+            ghsa.gh_auth_ok()
+        self.assertEqual(probe.call_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
