@@ -587,6 +587,109 @@ class TestFlaskApp(unittest.TestCase):
         self.assertIn(f"'nonce-{nonce}'", csp)
 
 
+class TestApiVersioning(unittest.TestCase):
+    """Every API route answers on both /api/... and /api/v1/...."""
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self._orig_db = cache.DB_PATH
+        cache.DB_PATH = self.tmp.name
+        self._env = mock.patch.dict(os.environ, {
+            "VULNSIGHT_API_TOKEN": "", "VULNSIGHT_RATE_LIMIT": "off",
+            "HOST": "127.0.0.1",
+        }, clear=False)
+        self._env.start()
+        from app import create_app
+        self.app = create_app()
+        self.app.config["TESTING"] = True
+        self.client = self.app.test_client()
+
+    def tearDown(self):
+        self._env.stop()
+        cache.DB_PATH = self._orig_db
+        for ext in ["", "-wal", "-shm"]:
+            try:
+                os.unlink(self.tmp.name + ext)
+            except OSError:
+                pass
+
+    def test_every_api_route_has_a_v1_twin(self):
+        """Fails when a new /api/ route ships without its versioned alias."""
+        rules = [
+            str(rule) for rule in self.app.url_map.iter_rules()
+            if str(rule).startswith("/api/")
+        ]
+        legacy = {r for r in rules if not r.startswith("/api/v1/")}
+        versioned = {
+            "/api" + r[len("/api/v1"):] for r in rules if r.startswith("/api/v1/")
+        }
+        self.assertTrue(legacy, "no /api routes found — the check would be vacuous")
+        self.assertEqual(
+            legacy - versioned, set(),
+            "these /api routes have no /api/v1 alias",
+        )
+
+    def test_v1_and_legacy_return_the_same_payload(self):
+        for legacy, versioned in (
+            ("/api/meta", "/api/v1/meta"),
+            ("/api/cwes", "/api/v1/cwes"),
+            ("/api/osv/status", "/api/v1/osv/status"),
+        ):
+            with self.subTest(path=versioned):
+                with mock.patch("modules.ghsa_client.gh_auth_ok", return_value=True):
+                    a = self.client.get(legacy)
+                    b = self.client.get(versioned)
+                self.assertEqual(a.status_code, 200)
+                self.assertEqual(b.status_code, 200)
+                self.assertEqual(a.get_json(), b.get_json())
+
+    def test_v1_search_is_rate_limited_like_the_legacy_path(self):
+        """The limiter matches on endpoint; a path match left /api/v1 unlimited."""
+        self._env.stop()
+        self._env = mock.patch.dict(os.environ, {
+            "VULNSIGHT_API_TOKEN": "", "VULNSIGHT_RATE_LIMIT": "on",
+            "VULNSIGHT_SEARCH_RATE": "1", "VULNSIGHT_RATE_WINDOW": "60",
+            "HOST": "127.0.0.1",
+        }, clear=False)
+        self._env.start()
+        from app import create_app
+        client = create_app().test_client()
+        with mock.patch("modules.ghsa_client.fetch_advisories", return_value=[SAMPLE]):
+            first = client.post("/api/v1/search",
+                                json={"categories": ["bac"], "ecosystem": "maven"})
+            second = client.post("/api/v1/search",
+                                 json={"categories": ["bac"], "ecosystem": "maven"})
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 429)
+
+    def test_search_reports_row_counts_per_pipeline_stage(self):
+        with mock.patch("modules.ghsa_client.fetch_advisories", return_value=[SAMPLE]):
+            r = self.client.post("/api/v1/search",
+                                 json={"categories": ["bac"], "ecosystem": "maven"})
+        stats = r.get_json()["stats"]
+        self.assertEqual(stats["fetched_per_source"], {"ghsa": 1})
+        self.assertEqual(
+            [stats["fetched_total"], stats["after_merge"],
+             stats["after_filter"], stats["returned"]],
+            [1, 1, 1, 1],
+        )
+        self.assertFalse(stats["truncated"])
+
+    def test_truncated_flag_distinguishes_paging_from_dedupe(self):
+        """`count` alone could not tell a dropped row from a de-duplicated one."""
+        raw = [dict(SAMPLE, ghsa_id=f"GHSA-{n}", cve_id=f"CVE-2026-{n}")
+               for n in range(5)]
+        with mock.patch("modules.ghsa_client.fetch_advisories", return_value=raw):
+            r = self.client.post("/api/v1/search", json={
+                "categories": ["bac"], "ecosystem": "maven", "max_results": 2,
+            })
+        stats = r.get_json()["stats"]
+        self.assertEqual(stats["after_filter"], 5)
+        self.assertEqual(stats["returned"], 2)
+        self.assertTrue(stats["truncated"])
+
+
 class TestAppAuthAndLimits(unittest.TestCase):
     def _make(self, env):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)

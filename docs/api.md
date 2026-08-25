@@ -3,6 +3,17 @@
 The UI is a client of this API and uses nothing private. Everything below works
 from `curl` or a script.
 
+## Versioning
+
+Every endpoint answers on two paths: a versioned one under `/api/v1/`, and the
+original unversioned one. **Scripts should use `/api/v1/`** — that is the path
+whose response shape is held stable.
+
+The unversioned aliases — `/api/meta`, `/api/cwes`, `/api/osv/status`,
+`/api/search`, `/api/ai/classify`, `/api/ai/test` — are kept indefinitely, with
+no deprecation planned. The UI still uses them. Both spellings hit the same
+handler, share the same rate-limit bucket, and return byte-identical payloads.
+
 ## Conventions
 
 - `POST` bodies must be a **JSON object** with `Content-Type: application/json`.
@@ -25,7 +36,7 @@ packages, the curated classes (key, code, group, label, description, core,
 extended, terms), OSV-supported ecosystems, whether AI is configured, the AI call
 budget, and whether auth is required.
 
-## `GET /api/meta`
+## `GET /api/v1/meta`
 
 Reference data for the curated taxonomy.
 
@@ -42,7 +53,7 @@ Reference data for the curated taxonomy.
 }
 ```
 
-## `GET /api/cwes`
+## `GET /api/v1/cwes`
 
 The full MITRE catalog, column-oriented to keep it small (~66 KB).
 
@@ -59,7 +70,7 @@ Sent with a version `ETag` and `Cache-Control: private, max-age=86400`; a
 conditional request with `If-None-Match` returns `304`. `aliases` is
 pipe-separated and may be empty. Deprecated CWEs are excluded.
 
-## `GET /api/osv/status`
+## `GET /api/v1/osv/status`
 
 Which OSV bulk exports are on disk, and how stale.
 
@@ -72,7 +83,7 @@ Which OSV bulk exports are on disk, and how stale.
 
 ---
 
-## `POST /api/search`
+## `POST /api/v1/search`
 
 ```jsonc
 {
@@ -100,8 +111,18 @@ Response:
     "categories": ["cwe:1321", "bac"],   // canonicalised and de-duplicated
     "cwes": ["1321", "284", "…"],        // what was actually filtered on
     "ecosystem": "maven", "severity": "any", "affects": null,
+    "published": ">=2026-01-01", "type": "reviewed",
+    "sort": "published", "direction": "desc", "include_extended": true,
     "max_results": 100, "sources": ["ghsa"],
     "per_source": {"ghsa": 25}           // counted BEFORE merge/filter/truncate
+  },
+  "stats": {
+    "fetched_per_source": {"ghsa": 25},  // same numbers as query.per_source
+    "fetched_total": 25,                 // rows that arrived from all sources
+    "after_merge": 22,                   // 3 were the same advisory twice
+    "after_filter": 20,                  // 2 failed a local filter
+    "returned": 20,                      // == count == len(results)
+    "truncated": false                   // true when max_results cut the list
   },
   "warnings": ["…"],
   "results": [ /* normalized advisories */ ]
@@ -115,14 +136,27 @@ Each result carries `advisory_id`, `ghsa_id`, `cve_id`, `aliases`, `sources`,
 `html_url`, `summary`, `description`, and `ai` when a fresh cached verdict exists
 for **every** requested category.
 
-`per_source` counts are pre-merge, so they will not sum to `count`.
+`per_source` counts are pre-merge, so they will not sum to `count`. That gap
+used to be unexplainable from the response — a smaller `count` could mean rows
+were de-duplicated, filtered, or cut by `max_results`, and a script had no way
+to tell which. `stats` names each stage, so a client can distinguish "these were
+the same advisory reported by two sources" (`after_merge < fetched_total`) from
+"a local filter rejected them" (`after_filter < after_merge`).
+
+**`truncated` means the *local* pipeline dropped rows to honour `max_results`.
+It does not mean the upstream source has no more.** Each source truncates to
+`max_results` on its own before the merge — GHSA does it server-side — so a
+single-source search almost always reports `truncated: false` even when the
+source holds thousands more. It becomes informative when several sources
+contribute together. There is no cursor: to widen a search, raise `max_results`
+(ceiling 500) or narrow the query by ecosystem, severity or date.
 
 Errors: `Select at least one bug class or CWE.` ·
 `Unsupported categories: cwe:99999999` · `Unsupported ecosystem: …` ·
 `Invalid published filter: …` · `GHSA fetch failed.` (502, only when it was the
 sole source).
 
-## `POST /api/ai/classify`
+## `POST /api/v1/ai/classify`
 
 ```jsonc
 {
@@ -152,7 +186,7 @@ Errors: `AI not configured. Set AI_* in .env.` · `No advisories to classify.` �
 `Too many advisories; maximum batch size is 100.` ·
 `Request would issue N AI calls …`
 
-## `POST /api/ai/test`
+## `POST /api/v1/ai/test`
 
 Empty body. Sends one trivial prompt to confirm the endpoint is reachable
 without classifying anything.

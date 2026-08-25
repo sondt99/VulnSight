@@ -129,10 +129,13 @@ def create_app():
     def _rate_limit():
         if request.method != "POST" or not app.config.get("RATE_LIMIT_ENABLED", True):
             return None
+        # Matched on the endpoint, not the path: every route answers on both
+        # /api/... and /api/v1/..., and a path match would have left the
+        # versioned alias unlimited.
         limiter = None
-        if request.path == "/api/search":
+        if request.endpoint == "api_search":
             limiter = app.config.get("SEARCH_LIMITER")
-        elif request.path in ("/api/ai/classify", "/api/ai/test"):
+        elif request.endpoint in ("api_ai_classify", "api_ai_test"):
             limiter = app.config.get("AI_LIMITER")
         if limiter is None:
             return None
@@ -244,6 +247,7 @@ def create_app():
     # -----------------------------------------------------------------------
 
     @app.route("/api/meta")
+    @app.route("/api/v1/meta")
     def api_meta():
         return jsonify(
             {
@@ -265,6 +269,7 @@ def create_app():
         )
 
     @app.route("/api/cwes")
+    @app.route("/api/v1/cwes")
     def api_cwes():
         """Full MITRE CWE catalog powering the UI's CWE/bug-name search box.
 
@@ -283,6 +288,7 @@ def create_app():
         return response
 
     @app.route("/api/ai/test", methods=["POST"])
+    @app.route("/api/v1/ai/test", methods=["POST"])
     def api_ai_test():
         _body, error = _json_object()
         if error:
@@ -290,6 +296,7 @@ def create_app():
         return jsonify(ai_classifier.ping())
 
     @app.route("/api/osv/status")
+    @app.route("/api/v1/osv/status")
     def api_osv_status():
         return jsonify({
             "supported": list(osv_client.ECOSYSTEM_MAP.keys()),
@@ -297,6 +304,7 @@ def create_app():
         })
 
     @app.route("/api/search", methods=["POST"])
+    @app.route("/api/v1/search", methods=["POST"])
     def api_search():
         body, error = _json_object()
         if error:
@@ -316,16 +324,26 @@ def create_app():
                     "ecosystem": q.ecosystem,
                     "severity": q.severity,
                     "affects": q.affects,
+                    "published": q.published,
+                    "type": q.adv_type,
+                    "sort": q.sort,
+                    "direction": q.direction,
+                    "include_extended": q.include_extended,
                     "max_results": q.max_results,
                     "sources": q.sources,
                     "per_source": outcome.per_source,
                 },
+                # Row counts per pipeline stage. `count` alone could not tell a
+                # de-duplicated row from one dropped by max_results, so a
+                # paging client had no way to know whether more existed.
+                "stats": outcome.stats,
                 "warnings": outcome.warnings,
                 "results": outcome.results,
             }
         )
 
     @app.route("/api/ai/classify", methods=["POST"])
+    @app.route("/api/v1/ai/classify", methods=["POST"])
     def api_ai_classify():
         body, error = _json_object()
         if error:

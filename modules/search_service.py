@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import ai_classifier
 from . import cache
@@ -74,6 +74,11 @@ class SearchOutcome:
     results: list[dict]
     warnings: list[str]
     per_source: dict[str, int]
+    #: Row counts at each pipeline stage. ``per_source`` is measured before the
+    #: merge and ``len(results)`` after truncation, so the two never agreed and
+    #: a script could not tell a de-duplicated row from a dropped one. These
+    #: name each stage instead of leaving the caller to infer it.
+    stats: dict = field(default_factory=dict)
 
 
 def parse_str_list(
@@ -484,7 +489,9 @@ def run_search(q: SearchQuery) -> SearchOutcome:
                 logger.warning("OSV native fetch failed: %s", e)
                 warnings.append("OSV native fetch failed.")
 
+    fetched_total = len(collected)
     results = merge_advisories(collected)
+    merged_total = len(results)
     results = [
         record for record in results
         if matches_common_filters(
@@ -494,14 +501,15 @@ def run_search(q: SearchQuery) -> SearchOutcome:
             severity=q.severity,
         )
     ]
+    filtered_total = len(results)
 
     # Sort by the requested field. Numeric EPSS fields cannot fall back to ""
     # — mixed float/str keys raise TypeError on Python 3.
-    field = _SORT_FIELD[q.sort]
-    numeric = field in ("epss_percentage", "epss_percentile")
+    sort_field = _SORT_FIELD[q.sort]
+    numeric = sort_field in ("epss_percentage", "epss_percentile")
 
     def _sort_key(record: dict):
-        value = record.get(field)
+        value = record.get(sort_field)
         if numeric:
             try:
                 return float(value)
@@ -569,4 +577,19 @@ def run_search(q: SearchQuery) -> SearchOutcome:
                     category_verdicts
                 )
 
-    return SearchOutcome(results=results, warnings=warnings, per_source=per_source)
+    return SearchOutcome(
+        results=results,
+        warnings=warnings,
+        per_source=per_source,
+        stats={
+            "fetched_per_source": dict(per_source),
+            "fetched_total": fetched_total,
+            "after_merge": merged_total,
+            "after_filter": filtered_total,
+            "returned": len(results),
+            # Whether rows were dropped purely to honour max_results, which is
+            # the signal a paging client needs and could not previously derive:
+            # a smaller `returned` might equally have meant de-duplication.
+            "truncated": filtered_total > len(results),
+        },
+    )
