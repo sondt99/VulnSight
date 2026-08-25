@@ -17,7 +17,16 @@ import sys
 
 from flask import Flask, g, jsonify, render_template, request
 
-from modules import ai_classifier, cache, config, osv_client, search_service, security
+from modules import (
+    ai_classifier,
+    cache,
+    config,
+    jobs,
+    openapi,
+    osv_client,
+    search_service,
+    security,
+)
 from modules import ghsa_client as ghsa
 from modules.cwe_categories import (
     CATEGORIES,
@@ -33,6 +42,8 @@ from modules.cwe_categories import (
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
+logger = logging.getLogger(__name__)
 
 MAX_AI_BATCH = 100
 
@@ -58,10 +69,56 @@ def _json_object() -> tuple[dict | None, tuple | None]:
     return body, None
 
 
+def _search_payload(q: search_service.SearchQuery, outcome) -> dict:
+    """The body of a search response.
+
+    Shared with the job runner so a polled result is identical to a synchronous
+    one — a client that switches to /jobs for a slow query should not have to
+    parse a second shape to read the same search.
+    """
+    return {
+        "count": len(outcome.results),
+        "query": {
+            "categories": q.categories,
+            "cwes": q.cwes,
+            "ecosystem": q.ecosystem,
+            "severity": q.severity,
+            "affects": q.affects,
+            "published": q.published,
+            "type": q.adv_type,
+            "sort": q.sort,
+            "direction": q.direction,
+            "include_extended": q.include_extended,
+            "max_results": q.max_results,
+            "sources": q.sources,
+            "per_source": outcome.per_source,
+        },
+        # Row counts per pipeline stage. `count` alone could not tell a
+        # de-duplicated row from one dropped by max_results, so a paging
+        # client had no way to know whether more existed.
+        "stats": outcome.stats,
+        "warnings": outcome.warnings,
+        "results": outcome.results,
+    }
+
+
+def _run_search_job(request_body: dict) -> dict:
+    """Job runner for a queued search. Executes off the request thread."""
+    try:
+        q = search_service.parse_search_query(request_body)
+        outcome = search_service.run_search(q)
+    except search_service.SearchError as e:
+        raise jobs.JobFailure(e.public_message, e.status) from e
+    return _search_payload(q, outcome)
+
+
 def create_app():
     """Application factory: build and return a fully configured Flask app."""
     config.load_dotenv()
     cache.init_db()
+    # Jobs from a previous process are not running any more — the pool died with
+    # it — so fail them now rather than leaving a poller waiting forever.
+    jobs.startup()
 
     app = Flask(__name__)
 
@@ -104,34 +161,24 @@ def create_app():
             return None
         return jsonify({"error": "Cross-origin request blocked."}), 403
 
-    @app.before_request
-    def _rate_limit():
-        if request.method != "POST" or not app.config.get("RATE_LIMIT_ENABLED", True):
-            return None
-        limiter = None
-        if request.path == "/api/search":
-            limiter = app.config.get("SEARCH_LIMITER")
-        elif request.path in ("/api/ai/classify", "/api/ai/test"):
-            limiter = app.config.get("AI_LIMITER")
-        if limiter is None:
-            return None
-        if limiter.allow(request.remote_addr or "unknown"):
-            return None
-        retry_after = str(getattr(limiter, "window_seconds", 60))
-        response = jsonify({"error": "Too many requests. Try again shortly."})
-        response.status_code = 429
-        response.headers["Retry-After"] = retry_after
-        return response
-
+    # Auth is registered before rate limiting, and the order is load-bearing:
+    # Flask runs before_request hooks in registration order, so with it the
+    # other way round an unauthenticated caller spent the operator's own bucket
+    # and locked them out with a 429 while every one of its requests was 401.
     @app.before_request
     def _auth_check():
-        if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
+        # Job polling is the one GET that is guarded. Every other GET serves
+        # public reference data (the CWE catalog, the taxonomy); a job result is
+        # the output of the operator's own query, and the id alone should not be
+        # the only thing standing between a reader and it.
+        guarded_read = request.endpoint == "api_jobs_get"
+        if request.method not in ("POST", "PUT", "PATCH", "DELETE") and not guarded_read:
             return None
         if not request.path.startswith("/api/"):
             return None
         expected = app.config.get("VULNSIGHT_TOKEN") or ""
         if not expected:
-            return None
+            return None  # auth not configured; token_matches itself fails closed
         provided = security.extract_request_token(
             request.headers.get("X-VulnSight-Token"),
             request.headers.get("Authorization"),
@@ -139,6 +186,34 @@ def create_app():
         if security.token_matches(expected, provided):
             return None
         return jsonify({"error": "Authentication required."}), 401
+
+    @app.before_request
+    def _rate_limit():
+        if request.method != "POST" or not app.config.get("RATE_LIMIT_ENABLED", True):
+            return None
+        # Matched on the endpoint, not the path: every route answers on both
+        # /api/... and /api/v1/..., and a path match would have left the
+        # versioned alias unlimited.
+        limiter = None
+        # Queueing a search costs the same upstream budget as running one, so
+        # /jobs shares the search bucket. Leaving it out would have made the job
+        # endpoint a free way around the very limit it exists to work with.
+        if request.endpoint in ("api_search", "api_jobs_create"):
+            limiter = app.config.get("SEARCH_LIMITER")
+        elif request.endpoint in ("api_ai_classify", "api_ai_test"):
+            limiter = app.config.get("AI_LIMITER")
+        if limiter is None:
+            return None
+        key = security.client_key(
+            request.remote_addr, request.headers.get("X-Forwarded-For")
+        )
+        if limiter.allow(key):
+            return None
+        retry_after = str(getattr(limiter, "window_seconds", 60))
+        response = jsonify({"error": "Too many requests. Try again shortly."})
+        response.status_code = 429
+        response.headers["Retry-After"] = retry_after
+        return response
 
     @app.before_request
     def create_csp_nonce():
@@ -170,9 +245,32 @@ def create_app():
         )
         return response
 
+    # Error handlers. A script driving /api/ is promised {"error": ...} on every
+    # failure, but only 413 was handled, so a wrong path or an unhandled
+    # exception answered with a Werkzeug HTML page — and a client doing
+    # r.json() got a parse error instead of the reason. HTML is still correct
+    # for the UI, so the shape is chosen by path.
+    def _api_error(message: str, status: int, original):
+        if request.path.startswith("/api/"):
+            return jsonify({"error": message}), status
+        return original
+
     @app.errorhandler(413)
-    def request_too_large(_error):
-        return jsonify({"error": "Request body is too large."}), 413
+    def request_too_large(error):
+        return _api_error("Request body is too large.", 413, error)
+
+    @app.errorhandler(404)
+    def not_found(error):
+        return _api_error("No such endpoint.", 404, error)
+
+    @app.errorhandler(405)
+    def method_not_allowed(error):
+        return _api_error("Method not allowed for this endpoint.", 405, error)
+
+    @app.errorhandler(500)
+    def internal_error(error):
+        logger.exception("Unhandled error on %s", request.path)
+        return _api_error("Internal error. See server logs.", 500, error)
 
     # -----------------------------------------------------------------------
     # Pages
@@ -237,6 +335,7 @@ def create_app():
     # -----------------------------------------------------------------------
 
     @app.route("/api/meta")
+    @app.route("/api/v1/meta")
     def api_meta():
         return jsonify(
             {
@@ -258,6 +357,7 @@ def create_app():
         )
 
     @app.route("/api/cwes")
+    @app.route("/api/v1/cwes")
     def api_cwes():
         """Full MITRE CWE catalog powering the UI's CWE/bug-name search box.
 
@@ -276,13 +376,40 @@ def create_app():
         return response
 
     @app.route("/api/ai/test", methods=["POST"])
+    @app.route("/api/v1/ai/test", methods=["POST"])
     def api_ai_test():
         _body, error = _json_object()
         if error:
             return error
         return jsonify(ai_classifier.ping())
 
+    @app.route("/api/docs")
+    def api_docs():
+        """Human-readable reference, rendered in the browser from the spec.
+
+        Not Swagger UI: that means ~1.4 MB of vendored minified JavaScript in a
+        tool whose stated constraint is that an operator can read it end to end,
+        and relaxing style-src to 'unsafe-inline' for the styles it injects at
+        runtime. The spec itself remains the interoperable artefact — load
+        /api/v1/openapi.json into Swagger Editor, Postman or a generator.
+        """
+        return render_template("apidocs.html", csp_nonce=g.get("csp_nonce", ""))
+
+    @app.route("/api/openapi.json")
+    @app.route("/api/v1/openapi.json")
+    def api_openapi():
+        """The machine-readable contract, for client generators and Postman."""
+        payload = openapi.build_spec()
+        etag = f'W/"openapi-{openapi.API_VERSION}"'
+        if request.headers.get("If-None-Match") == etag:
+            return "", 304
+        response = jsonify(payload)
+        response.headers["ETag"] = etag
+        response.headers["Cache-Control"] = "private, max-age=3600"
+        return response
+
     @app.route("/api/osv/status")
+    @app.route("/api/v1/osv/status")
     def api_osv_status():
         return jsonify({
             "supported": list(osv_client.ECOSYSTEM_MAP.keys()),
@@ -290,6 +417,7 @@ def create_app():
         })
 
     @app.route("/api/search", methods=["POST"])
+    @app.route("/api/v1/search", methods=["POST"])
     def api_search():
         body, error = _json_object()
         if error:
@@ -300,25 +428,47 @@ def create_app():
             outcome = search_service.run_search(q)
         except search_service.SearchError as e:
             return jsonify({"error": e.public_message}), e.status
-        return jsonify(
-            {
-                "count": len(outcome.results),
-                "query": {
-                    "categories": q.categories,
-                    "cwes": q.cwes,
-                    "ecosystem": q.ecosystem,
-                    "severity": q.severity,
-                    "affects": q.affects,
-                    "max_results": q.max_results,
-                    "sources": q.sources,
-                    "per_source": outcome.per_source,
-                },
-                "warnings": outcome.warnings,
-                "results": outcome.results,
-            }
-        )
+        return jsonify(_search_payload(q, outcome))
+
+    @app.route("/api/jobs", methods=["POST"])
+    @app.route("/api/v1/jobs", methods=["POST"])
+    def api_jobs_create():
+        """Queue a search and return immediately with an id to poll.
+
+        Takes exactly the body /api/v1/search takes, so moving a slow query off
+        the request thread is a URL change and nothing else. The query is
+        validated here rather than inside the worker: a malformed request should
+        be a 400 the caller sees now, not a job that fails a minute later.
+        """
+        body, error = _json_object()
+        if error:
+            return error
+        assert body is not None
+        try:
+            search_service.parse_search_query(body)
+        except search_service.SearchError as e:
+            return jsonify({"error": e.public_message}), e.status
+        job_id = jobs.submit("search", body, _run_search_job)
+        response = jsonify({
+            "job_id": job_id,
+            "kind": "search",
+            "status": "queued",
+            "poll": f"/api/v1/jobs/{job_id}",
+        })
+        response.status_code = 202
+        response.headers["Location"] = f"/api/v1/jobs/{job_id}"
+        return response
+
+    @app.route("/api/jobs/<job_id>")
+    @app.route("/api/v1/jobs/<job_id>")
+    def api_jobs_get(job_id: str):
+        job = jobs.get(job_id)
+        if job is None:
+            return jsonify({"error": "No such job."}), 404
+        return jsonify(jobs.public_view(job))
 
     @app.route("/api/ai/classify", methods=["POST"])
+    @app.route("/api/v1/ai/classify", methods=["POST"])
     def api_ai_classify():
         body, error = _json_object()
         if error:

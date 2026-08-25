@@ -1,0 +1,177 @@
+/* API reference page. Standalone rather than sharing style.css: that file is
+   1700 lines of app UI, and this page needs a dozen rules. Light and dark both
+   come from the same tokens. */
+
+:root {
+  --bg: #fbfbfd;
+  --panel: #ffffff;
+  --ink: #1a1d24;
+  --muted: #616a7a;
+  --line: #e2e6ee;
+  --accent: #2f5bd4;
+  --code-bg: #f1f3f8;
+  --get: #1f7a4d;
+  --post: #9a4d0f;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161b;
+    --panel: #1b1e25;
+    --ink: #e7eaf0;
+    --muted: #9aa3b4;
+    --line: #2b313c;
+    --accent: #7fa4ff;
+    --code-bg: #232833;
+    --get: #6ed3a0;
+    --post: #e9a765;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+code, .ty { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.head h1 { margin: 0; font-size: 20px; letter-spacing: -0.01em; }
+.sub { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+
+.speclink {
+  color: var(--accent);
+  text-decoration: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.speclink:hover { border-color: var(--accent); }
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(200px, 260px) minmax(0, 1fr);
+  gap: 24px;
+  padding: 24px;
+  align-items: start;
+}
+
+@media (max-width: 720px) {
+  .layout { grid-template-columns: 1fr; }
+}
+
+nav { display: flex; flex-direction: column; gap: 4px; }
+
+nav button {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+nav button:hover { background: var(--code-bg); }
+nav button.on { background: var(--panel); border-color: var(--line); }
+nav button code { font-size: 13px; }
+
+.m { font-size: 10px; font-weight: 700; letter-spacing: 0.06em; }
+.m-get { color: var(--get); }
+.m-post { color: var(--post); }
+
+section {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 20px 24px;
+  min-width: 0;
+}
+
+section h2 { margin: 0 0 10px; font-size: 17px; display: flex; gap: 10px; align-items: baseline; }
+section h2 code { font-size: 15px; }
+section h3 { margin: 24px 0 8px; font-size: 12px; text-transform: uppercase;
+             letter-spacing: 0.07em; color: var(--muted); }
+
+.lede { margin: 0 0 8px; font-size: 15px; }
+.desc { margin: 0 0 8px; color: var(--muted); }
+.muted { color: var(--muted); }
+
+.note {
+  margin: 12px 0;
+  padding: 10px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--code-bg);
+  border-radius: 0 6px 6px 0;
+  font-size: 13px;
+}
+
+/* Wide tables scroll inside their own box; the page never scrolls sideways. */
+.fields { width: 100%; border-collapse: collapse; font-size: 13px; display: block;
+          overflow-x: auto; }
+.fields thead th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.fields td { padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.fields tr:last-child td { border-bottom: 0; }
+.fields code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+
+/* Type column wraps. It used to be nowrap, which reads better for `string` but
+   makes one long enum — ecosystem lists twelve — widen the table past its
+   container and push the Notes column out of sight entirely. The rows still
+   grew to fit the wrapped notes, so the symptom was tall blank gaps rather than
+   anything that looked like overflow. */
+.fields td.ty { color: var(--muted); max-width: 32ch; overflow-wrap: anywhere; }
+.fields td:first-child { white-space: nowrap; }
+
+/* Nesting depth. Classes rather than inline styles because the CSP is
+   style-src 'self' — a style="" attribute is dropped without a word, and the
+   schema tree renders flat while looking like it worked.
+
+   Qualified with .fields td so they out-specify the `.fields td` padding above:
+   a bare `.d1` scores (0,1,0) against its (0,1,1) and loses, which renders flat
+   in exactly the same way, just for a different reason. */
+.fields td.d0 { padding-left: 10px; }
+.fields td.d1 { padding-left: 24px; }
+.fields td.d2 { padding-left: 38px; }
+.fields td.d3 { padding-left: 52px; }
+.fields td.d4 { padding-left: 66px; }
+
+.req {
+  margin-left: 6px;
+  font-size: 10px;
+  color: var(--post);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.dflt { color: var(--muted); font-size: 12px; }
+
+.code-2 { color: var(--get); }
+.code-4, .code-5 { color: var(--post); }

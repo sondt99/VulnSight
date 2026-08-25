@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import io
 import tempfile
+import time
 import unittest
 import urllib.error
 from unittest import mock
@@ -587,6 +588,271 @@ class TestFlaskApp(unittest.TestCase):
         self.assertIn(f"'nonce-{nonce}'", csp)
 
 
+class TestApiVersioning(unittest.TestCase):
+    """Every API route answers on both /api/... and /api/v1/...."""
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self._orig_db = cache.DB_PATH
+        cache.DB_PATH = self.tmp.name
+        self._env = mock.patch.dict(os.environ, {
+            "VULNSIGHT_API_TOKEN": "", "VULNSIGHT_RATE_LIMIT": "off",
+            "HOST": "127.0.0.1",
+        }, clear=False)
+        self._env.start()
+        from app import create_app
+        self.app = create_app()
+        self.app.config["TESTING"] = True
+        self.client = self.app.test_client()
+
+    def tearDown(self):
+        self._env.stop()
+        cache.DB_PATH = self._orig_db
+        for ext in ["", "-wal", "-shm"]:
+            try:
+                os.unlink(self.tmp.name + ext)
+            except OSError:
+                pass
+
+    def test_every_api_route_has_a_v1_twin(self):
+        """Fails when a new /api/ route ships without its versioned alias."""
+        # /api/docs is an HTML reference page, not versioned API surface: it
+        # renders whatever the current spec says, so there is nothing to pin.
+        not_api_surface = {"/api/docs"}
+        rules = [
+            str(rule) for rule in self.app.url_map.iter_rules()
+            if str(rule).startswith("/api/") and str(rule) not in not_api_surface
+        ]
+        legacy = {r for r in rules if not r.startswith("/api/v1/")}
+        versioned = {
+            "/api" + r[len("/api/v1"):] for r in rules if r.startswith("/api/v1/")
+        }
+        self.assertTrue(legacy, "no /api routes found — the check would be vacuous")
+        self.assertEqual(
+            legacy - versioned, set(),
+            "these /api routes have no /api/v1 alias",
+        )
+
+    def test_v1_and_legacy_return_the_same_payload(self):
+        for legacy, versioned in (
+            ("/api/meta", "/api/v1/meta"),
+            ("/api/cwes", "/api/v1/cwes"),
+            ("/api/osv/status", "/api/v1/osv/status"),
+        ):
+            with self.subTest(path=versioned):
+                with mock.patch("modules.ghsa_client.gh_auth_ok", return_value=True):
+                    a = self.client.get(legacy)
+                    b = self.client.get(versioned)
+                self.assertEqual(a.status_code, 200)
+                self.assertEqual(b.status_code, 200)
+                self.assertEqual(a.get_json(), b.get_json())
+
+    def test_v1_search_is_rate_limited_like_the_legacy_path(self):
+        """The limiter matches on endpoint; a path match left /api/v1 unlimited."""
+        self._env.stop()
+        self._env = mock.patch.dict(os.environ, {
+            "VULNSIGHT_API_TOKEN": "", "VULNSIGHT_RATE_LIMIT": "on",
+            "VULNSIGHT_SEARCH_RATE": "1", "VULNSIGHT_RATE_WINDOW": "60",
+            "HOST": "127.0.0.1",
+        }, clear=False)
+        self._env.start()
+        from app import create_app
+        client = create_app().test_client()
+        with mock.patch("modules.ghsa_client.fetch_advisories", return_value=[SAMPLE]):
+            first = client.post("/api/v1/search",
+                                json={"categories": ["bac"], "ecosystem": "maven"})
+            second = client.post("/api/v1/search",
+                                 json={"categories": ["bac"], "ecosystem": "maven"})
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 429)
+
+    def test_search_reports_row_counts_per_pipeline_stage(self):
+        with mock.patch("modules.ghsa_client.fetch_advisories", return_value=[SAMPLE]):
+            r = self.client.post("/api/v1/search",
+                                 json={"categories": ["bac"], "ecosystem": "maven"})
+        stats = r.get_json()["stats"]
+        self.assertEqual(stats["fetched_per_source"], {"ghsa": 1})
+        self.assertEqual(
+            [stats["fetched_total"], stats["after_merge"],
+             stats["after_filter"], stats["returned"]],
+            [1, 1, 1, 1],
+        )
+        self.assertFalse(stats["truncated"])
+
+    def test_truncated_flag_distinguishes_paging_from_dedupe(self):
+        """`count` alone could not tell a dropped row from a de-duplicated one."""
+        raw = [dict(SAMPLE, ghsa_id=f"GHSA-{n}", cve_id=f"CVE-2026-{n}")
+               for n in range(5)]
+        with mock.patch("modules.ghsa_client.fetch_advisories", return_value=raw):
+            r = self.client.post("/api/v1/search", json={
+                "categories": ["bac"], "ecosystem": "maven", "max_results": 2,
+            })
+        stats = r.get_json()["stats"]
+        self.assertEqual(stats["after_filter"], 5)
+        self.assertEqual(stats["returned"], 2)
+        self.assertTrue(stats["truncated"])
+
+
+class TestJobEndpoints(unittest.TestCase):
+    """The async path: submit, poll, and the guards around both."""
+
+    def _make(self, env=None):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self._orig_db = cache.DB_PATH
+        cache.DB_PATH = self.tmp.name
+        merged = {
+            "VULNSIGHT_API_TOKEN": "", "VULNSIGHT_RATE_LIMIT": "off",
+            "HOST": "127.0.0.1",
+        }
+        merged.update(env or {})
+        self._env = mock.patch.dict(os.environ, merged, clear=False)
+        self._env.start()
+        from app import create_app
+        self.app = create_app()
+        self.app.config["TESTING"] = True
+        self.client = self.app.test_client()
+
+    def tearDown(self):
+        from modules import jobs
+        jobs.shutdown(wait=True)
+        if hasattr(self, "_env"):
+            self._env.stop()
+        if hasattr(self, "_orig_db"):
+            cache.DB_PATH = self._orig_db
+        for ext in ["", "-wal", "-shm"]:
+            try:
+                os.unlink(self.tmp.name + ext)
+            except OSError:
+                pass
+
+    def _poll(self, job_id, timeout=10.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            r = self.client.get(f"/api/v1/jobs/{job_id}")
+            body = r.get_json()
+            if body["status"] in ("done", "failed"):
+                return body
+            time.sleep(0.01)
+        raise AssertionError("job never finished")
+
+    def test_submit_returns_202_with_a_pollable_location(self):
+        self._make()
+        with mock.patch("modules.ghsa_client.fetch_advisories", return_value=[SAMPLE]):
+            r = self.client.post("/api/v1/jobs",
+                                 json={"categories": ["bac"], "ecosystem": "maven"})
+            self.assertEqual(r.status_code, 202)
+            body = r.get_json()
+            self.assertEqual(body["status"], "queued")
+            self.assertEqual(body["kind"], "search")
+            self.assertEqual(r.headers["Location"], f"/api/v1/jobs/{body['job_id']}")
+            done = self._poll(body["job_id"])
+        self.assertEqual(done["status"], "done")
+        self.assertEqual(done["result"]["count"], 1)
+
+    def test_job_result_matches_the_synchronous_response(self):
+        """Moving a slow query to /jobs must not mean parsing a second shape."""
+        self._make()
+        query = {"categories": ["bac"], "ecosystem": "maven"}
+        with mock.patch("modules.ghsa_client.fetch_advisories", return_value=[SAMPLE]):
+            sync = self.client.post("/api/v1/search", json=query).get_json()
+            job_id = self.client.post("/api/v1/jobs", json=query).get_json()["job_id"]
+            async_result = self._poll(job_id)["result"]
+        self.assertEqual(sync.keys(), async_result.keys())
+        self.assertEqual(sync["query"], async_result["query"])
+        self.assertEqual(sync["stats"], async_result["stats"])
+        self.assertEqual(sync["results"], async_result["results"])
+
+    def test_a_bad_query_is_rejected_now_not_a_minute_later(self):
+        self._make()
+        r = self.client.post("/api/v1/jobs", json={"categories": []})
+        self.assertEqual(r.status_code, 400)
+        self.assertNotIn("job_id", r.get_json())
+
+    def test_a_failing_search_becomes_a_failed_job_with_its_status(self):
+        self._make()
+        with mock.patch("modules.ghsa_client.fetch_advisories",
+                        side_effect=ghsa.GhCliError("nope")):
+            job_id = self.client.post(
+                "/api/v1/jobs",
+                json={"categories": ["bac"], "sources": ["ghsa"]},
+            ).get_json()["job_id"]
+            done = self._poll(job_id)
+        self.assertEqual(done["status"], "failed")
+        self.assertEqual(done["error"], "GHSA fetch failed.")
+        self.assertNotIn("nope", done["error"])
+        self.assertNotIn("result", done)
+
+    def test_unknown_and_malformed_job_ids_are_404(self):
+        self._make()
+        for job_id in ("0" * 24, "not-a-job", "a" * 23, "A" * 24, "1;DROP TABLE jobs"):
+            with self.subTest(job_id=job_id):
+                r = self.client.get(f"/api/v1/jobs/{job_id}")
+                self.assertEqual(r.status_code, 404)
+                self.assertEqual(r.get_json(), {"error": "No such job."})
+
+    def test_traversal_in_a_job_id_never_reaches_the_handler(self):
+        """Werkzeug normalises the path, so it matches no route at all."""
+        self._make()
+        r = self.client.get("/api/v1/jobs/%2e%2e%2f%2e%2e%2fetc%2fpasswd")
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(r.get_json(), {"error": "No such endpoint."})
+
+    def test_api_errors_are_json_even_when_no_route_matches(self):
+        """A script doing r.json() on a wrong path used to get a parse error."""
+        self._make()
+        missing = self.client.get("/api/v1/nope")
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(missing.get_json(), {"error": "No such endpoint."})
+
+        wrong_method = self.client.get("/api/v1/search")
+        self.assertEqual(wrong_method.status_code, 405)
+        self.assertIn("error", wrong_method.get_json())
+
+        # The UI still gets HTML, because a browser is not a script.
+        html = self.client.get("/definitely-not-a-page")
+        self.assertEqual(html.status_code, 404)
+        self.assertIsNone(html.get_json(silent=True))
+
+    def test_polling_requires_the_token_unlike_other_gets(self):
+        """A job result is the operator's query output, not public reference data."""
+        self._make({"VULNSIGHT_API_TOKEN": "secret"})
+        headers = {"X-VulnSight-Token": "secret"}
+        with mock.patch("modules.ghsa_client.fetch_advisories", return_value=[SAMPLE]):
+            job_id = self.client.post(
+                "/api/v1/jobs", json={"categories": ["bac"], "ecosystem": "maven"},
+                headers=headers,
+            ).get_json()["job_id"]
+        self.assertEqual(self.client.get(f"/api/v1/jobs/{job_id}").status_code, 401)
+        self.assertEqual(self.client.get("/api/v1/cwes").status_code, 200)
+        authed = self.client.get(f"/api/v1/jobs/{job_id}", headers=headers)
+        self.assertEqual(authed.status_code, 200)
+
+    def test_submitting_a_job_spends_the_search_rate_limit(self):
+        """Otherwise /jobs is a free way around the limit it exists to work with."""
+        self._make({"VULNSIGHT_RATE_LIMIT": "on", "VULNSIGHT_SEARCH_RATE": "1",
+                    "VULNSIGHT_RATE_WINDOW": "60"})
+        query = {"categories": ["bac"], "ecosystem": "maven"}
+        with mock.patch("modules.ghsa_client.fetch_advisories", return_value=[SAMPLE]):
+            first = self.client.post("/api/v1/jobs", json=query)
+            second = self.client.post("/api/v1/jobs", json=query)
+            third = self.client.post("/api/v1/search", json=query)
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(second.status_code, 429)
+        self.assertEqual(third.status_code, 429)  # shared bucket, not two budgets
+
+    def test_legacy_job_paths_work_too(self):
+        self._make()
+        with mock.patch("modules.ghsa_client.fetch_advisories", return_value=[SAMPLE]):
+            r = self.client.post("/api/jobs",
+                                 json={"categories": ["bac"], "ecosystem": "maven"})
+            self.assertEqual(r.status_code, 202)
+            job_id = r.get_json()["job_id"]
+            self._poll(job_id)
+        self.assertEqual(self.client.get(f"/api/jobs/{job_id}").status_code, 200)
+
+
 class TestAppAuthAndLimits(unittest.TestCase):
     def _make(self, env):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -678,16 +944,69 @@ class TestAppAuthAndLimits(unittest.TestCase):
         self.assertEqual(second.status_code, 429)
         self.assertEqual(second.headers.get("Retry-After"), "60")
 
-    def test_unauthenticated_posts_are_rate_limited(self):
+    def test_unauthenticated_posts_do_not_consume_the_rate_limit(self):
+        """Auth runs before rate limiting, so a rejected caller spends nothing.
+
+        With the hooks the other way round an unauthenticated flood drained the
+        shared bucket and the operator's own next request — with the right
+        token — came back 429. Every request here is 401; none reaches the
+        limiter, and the authenticated request that follows still succeeds.
+        """
         self._make({
             "VULNSIGHT_API_TOKEN": "secret",
-            "VULNSIGHT_SEARCH_RATE": "1",
+            "VULNSIGHT_SEARCH_RATE": "2",
             "VULNSIGHT_RATE_WINDOW": "60",
         })
-        first = self.client.post("/api/search", json={"categories": ["bac"]})
-        second = self.client.post("/api/search", json={"categories": ["bac"]})
-        self.assertEqual(first.status_code, 401)
+        rejected = [
+            self.client.post("/api/search", json={"categories": ["bac"]}).status_code
+            for _ in range(6)
+        ]
+        self.assertEqual(rejected, [401] * 6)
+        with mock.patch("modules.ghsa_client.fetch_advisories", return_value=[SAMPLE]):
+            operator = self.client.post(
+                "/api/search",
+                json={"categories": ["bac"], "ecosystem": "maven"},
+                headers={"X-VulnSight-Token": "secret"},
+            )
+        self.assertEqual(operator.status_code, 200)
+
+    def test_rate_limit_key_ignores_forwarded_for_by_default(self):
+        """X-Forwarded-For is client-controlled; trusting it mints free buckets."""
+        self._make({"VULNSIGHT_SEARCH_RATE": "1", "VULNSIGHT_RATE_WINDOW": "60"})
+        with mock.patch("modules.ghsa_client.fetch_advisories", return_value=[SAMPLE]):
+            first = self.client.post(
+                "/api/search", json={"categories": ["bac"], "ecosystem": "maven"},
+                headers={"X-Forwarded-For": "1.1.1.1"},
+            )
+            second = self.client.post(
+                "/api/search", json={"categories": ["bac"], "ecosystem": "maven"},
+                headers={"X-Forwarded-For": "2.2.2.2"},
+            )
+        self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 429)
+
+    def test_rate_limit_key_honours_forwarded_for_when_proxy_trusted(self):
+        self._make({
+            "VULNSIGHT_SEARCH_RATE": "1",
+            "VULNSIGHT_RATE_WINDOW": "60",
+            "VULNSIGHT_TRUST_PROXY": "1",
+        })
+        with mock.patch("modules.ghsa_client.fetch_advisories", return_value=[SAMPLE]):
+            first = self.client.post(
+                "/api/search", json={"categories": ["bac"], "ecosystem": "maven"},
+                headers={"X-Forwarded-For": "1.1.1.1"},
+            )
+            other_client = self.client.post(
+                "/api/search", json={"categories": ["bac"], "ecosystem": "maven"},
+                headers={"X-Forwarded-For": "2.2.2.2"},
+            )
+            same_client = self.client.post(
+                "/api/search", json={"categories": ["bac"], "ecosystem": "maven"},
+                headers={"X-Forwarded-For": "1.1.1.1"},
+            )
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(other_client.status_code, 200)  # separate bucket
+        self.assertEqual(same_client.status_code, 429)   # same bucket, exhausted
 
     def test_non_loopback_autogens_token(self):
         data_dir = tempfile.mkdtemp()

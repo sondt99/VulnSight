@@ -30,6 +30,9 @@ Start at the top if you are new; each page is self-contained otherwise.
   end, and the known limits of the current design.
 - **[HTTP API](api.md)** — every endpoint with request/response shapes, useful
   for scripting the tool without the UI.
+- **[Scripting and CI](automation.md)** — driving it from cron or a pipeline:
+  auth, when a query needs the job API, reading the counts honestly, and a
+  working recipe.
 - **[Testing](testing.md)** — the offline suite, the optional browser suite, and
   how to verify a change properly.
 

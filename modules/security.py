@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import hmac
 import ipaddress
 import logging
@@ -91,16 +92,57 @@ def is_loopback_bind(host: str) -> bool:
         return False
 
 
+_SECRET_ENV_NAMES = (
+    "GLM_TOKEN",
+    "AI_TOKEN",
+    "ANTHROPIC_TOKEN",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "NVD_API_KEY",
+)
+
+
+def _provider_secret_env() -> tuple[str, ...]:
+    """Credential names implied by CVE_AI_PROVIDER.
+
+    The static list above only knows the providers that shipped first, so a
+    ``CVE_AI_PROVIDER=openai`` + ``OPENAI_TOKEN`` setup was invisible to it.
+    """
+    provider = os.environ.get("CVE_AI_PROVIDER", "").strip().upper()
+    if not provider.isidentifier():
+        return ()
+    return (f"{provider}_TOKEN", f"{provider}_API_KEY")
+
+
+@functools.lru_cache(maxsize=1)
+def gh_credentials_available() -> bool:
+    """Whether the `gh` CLI can spend someone's GitHub credentials.
+
+    Imported lazily — ghsa_client pulls in cwe_categories, and security is
+    imported early during startup.  Cached because it forks `gh auth status`,
+    which costs ~600 ms; the guards below only run once per process.
+    """
+    try:
+        from .ghsa_client import gh_auth_ok
+
+        return gh_auth_ok()
+    except Exception:
+        return False
+
+
 def has_loaded_secrets() -> bool:
-    keys = (
-        "GLM_TOKEN",
-        "AI_TOKEN",
-        "ANTHROPIC_TOKEN",
-        "GH_TOKEN",
-        "GITHUB_TOKEN",
-        "NVD_API_KEY",
-    )
-    return any(os.environ.get(key, "").strip() for key in keys)
+    """True when this process is able to spend someone's credentials.
+
+    Scanning the environment alone is not enough: ``gh auth login`` keeps its
+    token in the OS keyring, so on the most common local setup — `gh` logged
+    in, no AI keys yet — this reported "no secrets" and the non-loopback bind
+    guards below waved the process through with no API token. Anyone who could
+    reach the port could then drive `gh api` on the operator's account.
+    """
+    names = _SECRET_ENV_NAMES + _provider_secret_env()
+    if any(os.environ.get(name, "").strip() for name in names):
+        return True
+    return gh_credentials_available()
 
 
 def assert_safe_bind(host: str) -> None:
@@ -274,11 +316,30 @@ def extract_request_token(x_token: str | None, authorization: str | None) -> str
     return ""
 
 
+def client_key(remote_addr: str | None, forwarded_for: str | None) -> str:
+    """Bucket key for rate limiting.
+
+    ``X-Forwarded-For`` is honoured only when VULNSIGHT_TRUST_PROXY is set: the
+    header is client-controlled, so trusting it by default would let one caller
+    mint unlimited buckets. Ignoring it means everyone behind a proxy shares the
+    proxy's address, which is wrong in the other direction — so which failure
+    you get has to be the operator's choice, not a default.
+    """
+    if forwarded_for and env_flag("VULNSIGHT_TRUST_PROXY", False):
+        first = forwarded_for.split(",")[0].strip()
+        if first:
+            return first
+    return remote_addr or "unknown"
+
+
 def token_matches(expected: str, provided: str) -> bool:
-    """Constant-time compare. Empty *expected* means auth is not configured."""
-    if not expected:
-        return True
-    if not provided:
+    """Constant-time compare that fails closed.
+
+    An empty *expected* returns False rather than "auth is not configured".
+    Deciding that auth is off is the caller's job (see _auth_check); making it
+    this function's job put a total auth bypass one deleted line away.
+    """
+    if not expected or not provided:
         return False
     left = provided.encode("utf-8")
     right = expected.encode("utf-8")

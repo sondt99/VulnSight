@@ -1,0 +1,187 @@
+{#
+  API reference, rendered in the browser from /api/v1/openapi.json.
+
+  Deliberately not Swagger UI. That would mean vendoring ~1.4 MB of minified
+  third-party JavaScript into a tool whose stated constraint is that an operator
+  can read it end to end before pointing it at their credentials, and relaxing
+  style-src to 'unsafe-inline' because Swagger UI injects styles at runtime.
+  Neither trade is worth a nicer widget for eight endpoints.
+
+  The spec itself is the interoperable artefact: load /api/v1/openapi.json into
+  Swagger Editor, Postman, Insomnia or a client generator and you get all of it.
+#}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VulnSight API</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='apidocs.css') }}">
+</head>
+<body>
+  <header class="head">
+    <div>
+      <h1>VulnSight API</h1>
+      <p class="sub" id="tagline">Loading the specification…</p>
+    </div>
+    <a class="speclink" href="/api/v1/openapi.json">openapi.json</a>
+  </header>
+
+  <noscript>
+    <p class="note">This page renders the specification in the browser.
+      Without JavaScript, read <a href="/api/v1/openapi.json">openapi.json</a>
+      directly.</p>
+  </noscript>
+
+  <main class="layout">
+    <nav id="nav" aria-label="Endpoints"></nav>
+    <section id="detail"></section>
+  </main>
+
+  <script nonce="{{ csp_nonce }}">
+  (function () {
+    const nav = document.getElementById('nav');
+    const detail = document.getElementById('detail');
+
+    const esc = (v) => String(v ?? '').replace(/[&<>"']/g,
+      (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+    function schemaRows(schema, name, depth, required, out) {
+      out = out || [];
+      if (!schema || depth > 4) return out;
+      if (schema.allOf) {
+        schema.allOf.forEach((s) => schemaRows(s, name, depth, required, out));
+        return out;
+      }
+      let type = schema.type || 'any';
+      if (schema.enum) type += ' (' + schema.enum.join(' | ') + ')';
+      if (schema.nullable) type += ' | null';
+      if (name !== null) {
+        out.push({ depth, name, type, required,
+                   desc: schema.description || '',
+                   dflt: schema.default });
+      }
+      const props = schema.properties || {};
+      const req = new Set(schema.required || []);
+      Object.keys(props).forEach((key) => {
+        schemaRows(props[key], key, depth + (name === null ? 0 : 1),
+                   req.has(key), out);
+      });
+      if (schema.items && schema.items.properties) {
+        schemaRows(schema.items, null, depth, false, out);
+      }
+      return out;
+    }
+
+    function renderSchema(schema) {
+      const rows = schemaRows(schema, null, 0, false);
+      if (!rows.length) return '<p class="muted">Free-form object.</p>';
+      return '<table class="fields"><thead><tr><th>Field</th><th>Type</th>' +
+        '<th>Notes</th></tr></thead><tbody>' +
+        rows.map((r) => {
+          // Depth as a class, not an inline style: CSP is style-src 'self', so
+          // a style="" attribute is dropped silently and the tree looks flat.
+          const depth = 'd' + Math.min(r.depth, 4);
+          const req = r.required ? '<span class="req">required</span>' : '';
+          const dflt = r.dflt !== undefined
+            ? '<span class="dflt">default ' + esc(JSON.stringify(r.dflt)) + '</span>' : '';
+          return '<tr><td class="' + depth + '"><code>' + esc(r.name) + '</code>' +
+            req + '</td><td class="ty">' + esc(r.type) + '</td><td>' +
+            esc(r.desc) + ' ' + dflt + '</td></tr>';
+        }).join('') + '</tbody></table>';
+    }
+
+    function bodySchema(op) {
+      const c = op.requestBody && op.requestBody.content;
+      return c && c['application/json'] && c['application/json'].schema;
+    }
+
+    function resolveRef(spec, schema) {
+      if (schema && schema.$ref) {
+        const key = schema.$ref.split('/').pop();
+        return spec.components.schemas[key] || schema;
+      }
+      return schema;
+    }
+
+    function renderOperation(spec, path, method, op) {
+      const parts = [];
+      parts.push('<h2><span class="m m-' + method + '">' + method.toUpperCase() +
+        '</span> <code>' + esc(path) + '</code></h2>');
+      if (op.summary) parts.push('<p class="lede">' + esc(op.summary) + '</p>');
+      if (op.description) {
+        parts.push('<p class="desc">' + esc(op.description).replace(/\n\n/g, '</p><p class="desc">') + '</p>');
+      }
+      if (op.security && op.security.length) {
+        parts.push('<p class="note">Sends <code>X-VulnSight-Token</code> when ' +
+          '<code>VULNSIGHT_API_TOKEN</code> is configured.</p>');
+      }
+      if (op.parameters && op.parameters.length) {
+        parts.push('<h3>Path parameters</h3><table class="fields"><tbody>' +
+          op.parameters.map((p) => '<tr><td><code>' + esc(p.name) +
+            '</code></td><td class="ty">' + esc((p.schema || {}).type || '') +
+            '</td><td>' + esc(p.description || '') + '</td></tr>').join('') +
+          '</tbody></table>');
+      }
+      const body = resolveRef(spec, bodySchema(op));
+      if (body) {
+        parts.push('<h3>Request body</h3>' + renderSchema(body));
+      }
+      parts.push('<h3>Responses</h3><table class="fields"><tbody>' +
+        Object.keys(op.responses).map((code) => {
+          const r = op.responses[code];
+          return '<tr><td><code class="code-' + code[0] + '">' + esc(code) +
+            '</code></td><td colspan="2">' + esc(r.description || '') + '</td></tr>';
+        }).join('') + '</tbody></table>');
+
+      const ok = op.responses['200'] || op.responses['202'];
+      const okSchema = ok && ok.content && ok.content['application/json'] &&
+        resolveRef(spec, ok.content['application/json'].schema);
+      if (okSchema && (okSchema.properties || okSchema.allOf)) {
+        parts.push('<h3>Response body</h3>' + renderSchema(okSchema));
+      }
+      return parts.join('');
+    }
+
+    fetch('/api/v1/openapi.json', { headers: { Accept: 'application/json' } })
+      .then((r) => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then((spec) => {
+        document.getElementById('tagline').textContent =
+          spec.info.summary + ' — v' + spec.info.version;
+
+        const ops = [];
+        Object.keys(spec.paths).sort().forEach((path) => {
+          Object.keys(spec.paths[path]).forEach((method) => {
+            ops.push({ path, method, op: spec.paths[path][method] });
+          });
+        });
+
+        nav.innerHTML = ops.map((o, i) =>
+          '<button type="button" data-i="' + i + '">' +
+          '<span class="m m-' + o.method + '">' + o.method.toUpperCase() +
+          '</span><code>' + esc(o.path.replace('/api/v1', '')) + '</code></button>'
+        ).join('');
+
+        function select(i) {
+          detail.innerHTML = renderOperation(spec, ops[i].path, ops[i].method, ops[i].op);
+          Array.from(nav.children).forEach((b, j) =>
+            b.classList.toggle('on', i === j));
+          detail.scrollTop = 0;
+        }
+        nav.addEventListener('click', (e) => {
+          const btn = e.target.closest('button[data-i]');
+          if (btn) select(Number(btn.dataset.i));
+        });
+        select(0);
+      })
+      .catch((err) => {
+        document.getElementById('tagline').textContent =
+          'Could not load the specification: ' + err.message;
+      });
+  })();
+  </script>
+</body>
+</html>

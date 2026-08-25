@@ -1,7 +1,7 @@
 # Testing
 
 ```bash
-.venv/bin/python -m unittest discover -s tests        # 270 offline tests
+.venv/bin/python -m unittest discover -s tests        # 332: 311 offline + 21 browser
 .venv/bin/python -m unittest discover -s tests -v     # with names
 .venv/bin/python -m pytest tests/ -q                  # if you prefer pytest
 .venv/bin/python tests/test_app.py                    # a single file
@@ -14,19 +14,21 @@ OSV and the AI provider are all mocked.
 
 | File | Tests | Covers |
 |---|---|---|
-| `test_app.py` | 49 | routes, guards, DOM contract, page weight, AI cost cap |
+| `test_app.py` | 66 | routes, guards, `/api/v1` aliases, job endpoints, JSON errors, DOM contract, AI cost cap |
 | `test_ai_classifier.py` | 37 | prompt, verdict aggregation, key rotation, cooldowns |
 | `test_search_service.py` | 36 | query parsing, merge/dedupe, sort, filters |
+| `test_security.py` | 33 | bind/exposure rules, CSRF origin check, rate limiter, proxy trust |
 | `test_cwe_categories.py` | 30 | taxonomy invariants, `cwe:<id>`, picker catalog |
-| `test_security.py` | 27 | bind/exposure rules, CSRF origin check, rate limiter |
 | `test_nvd_client.py` | 21 | date windowing, normalisation, rate-limit handling |
 | `test_ui_e2e.py` | 21 | the real UI in a browser — *optional*, see below |
 | `test_cvss.py` | 13 | v3.0/3.1 base scores against spec vectors |
 | `test_epss_client.py` | 12 | batching, malformed responses |
+| `test_docs.py` | 11 | doc/code agreement: quoted numbers, routes, env vars, links |
 | `test_osv_client.py` | 11 | zip parsing, CWE and keyword filters |
 | `test_cache.py` | 9 | SQLite lifecycle, migrations, the v4 id backfill |
-| `test_docs.py` | 11 | doc/code agreement: quoted numbers, routes, env vars, links |
 | `test_ghsa_client.py` | 9 | `gh` invocation, cursor pagination |
+| `test_jobs.py` | 9 | job lifecycle, orphan recovery, error redaction, pruning |
+| `test_openapi.py` | 9 | spec/route agreement, and real responses against the schemas |
 | `test_query_filters.py` | 4 | shared published/affects/severity predicates |
 | `test_frontend_js.py` | 1 | runs every `tests/*.js` under node |
 

@@ -1,5 +1,6 @@
 """Unit tests for CSRF origin parsing, bind guards, tokens, and rate limits."""
 
+import inspect
 import os
 import re
 import sys
@@ -114,9 +115,15 @@ class TestMutatingRequestAllowed(unittest.TestCase):
 
 
 class TestToken(unittest.TestCase):
-    def test_not_configured(self):
-        self.assertTrue(security.token_matches("", ""))
-        self.assertTrue(security.token_matches("", "anything"))
+    def test_empty_expected_fails_closed(self):
+        """Deciding auth is off is the caller's job, not this function's."""
+        self.assertFalse(security.token_matches("", ""))
+        self.assertFalse(security.token_matches("", "anything"))
+
+    def test_comparison_is_constant_time(self):
+        """Pins hmac.compare_digest; a plain `==` passes every other assertion."""
+        source = inspect.getsource(security.token_matches)
+        self.assertIn("compare_digest", source)
 
     def test_match_and_mismatch(self):
         self.assertTrue(security.token_matches("secret", "secret"))
@@ -147,10 +154,57 @@ class TestBindGuard(unittest.TestCase):
         env = {
             "GLM_TOKEN": "", "AI_TOKEN": "", "ANTHROPIC_TOKEN": "",
             "GH_TOKEN": "", "GITHUB_TOKEN": "", "NVD_API_KEY": "",
-            "VULNSIGHT_EXPOSE": "",
+            "CVE_AI_PROVIDER": "", "VULNSIGHT_EXPOSE": "",
         }
-        with mock.patch.dict(os.environ, env, clear=False):
+        with mock.patch.dict(os.environ, env, clear=False), \
+             mock.patch.object(security, "gh_credentials_available", return_value=False):
             security.assert_safe_bind("0.0.0.0")
+
+    def test_public_bind_refuses_on_gh_keyring_credentials(self):
+        """`gh auth login` stores its token in the OS keyring, not the env.
+
+        Scanning env vars alone reported "no secrets" on the commonest local
+        setup, so the guard waved a 0.0.0.0 bind through with no API token
+        while `gh api` stayed fully usable by anyone who reached the port.
+        """
+        env = {
+            "GLM_TOKEN": "", "AI_TOKEN": "", "ANTHROPIC_TOKEN": "",
+            "GH_TOKEN": "", "GITHUB_TOKEN": "", "NVD_API_KEY": "",
+            "CVE_AI_PROVIDER": "", "VULNSIGHT_EXPOSE": "",
+        }
+        with mock.patch.dict(os.environ, env, clear=False), \
+             mock.patch.object(security, "gh_credentials_available", return_value=True):
+            self.assertTrue(security.has_loaded_secrets())
+            with self.assertRaises(SystemExit):
+                security.assert_safe_bind("0.0.0.0")
+
+    def test_provider_specific_token_counts_as_a_secret(self):
+        """The static name list only knew the providers that shipped first."""
+        env = {
+            "GLM_TOKEN": "", "AI_TOKEN": "", "ANTHROPIC_TOKEN": "",
+            "GH_TOKEN": "", "GITHUB_TOKEN": "", "NVD_API_KEY": "",
+            "CVE_AI_PROVIDER": "openai", "OPENAI_TOKEN": "sk-live",
+        }
+        with mock.patch.dict(os.environ, env, clear=False), \
+             mock.patch.object(security, "gh_credentials_available", return_value=False):
+            self.assertTrue(security.has_loaded_secrets())
+
+
+class TestClientKey(unittest.TestCase):
+    def test_forwarded_for_ignored_unless_proxy_is_trusted(self):
+        with mock.patch.dict(os.environ, {"VULNSIGHT_TRUST_PROXY": ""}, clear=False):
+            self.assertEqual(security.client_key("10.0.0.1", "1.2.3.4"), "10.0.0.1")
+
+    def test_forwarded_for_used_when_proxy_is_trusted(self):
+        with mock.patch.dict(os.environ, {"VULNSIGHT_TRUST_PROXY": "1"}, clear=False):
+            self.assertEqual(
+                security.client_key("10.0.0.1", "1.2.3.4, 10.0.0.1"), "1.2.3.4"
+            )
+            # A trusted proxy sending nothing usable falls back rather than crashing.
+            self.assertEqual(security.client_key("10.0.0.1", "  "), "10.0.0.1")
+
+    def test_missing_remote_addr_still_yields_a_key(self):
+        self.assertEqual(security.client_key(None, None), "unknown")
 
     def test_public_bind_with_secrets_refuses(self):
         with mock.patch.dict(
