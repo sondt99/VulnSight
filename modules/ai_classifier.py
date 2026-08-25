@@ -59,7 +59,10 @@ USER_AGENT = (
 # throttling, network blips). Client errors like a bad API key are NOT retried.
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 1.5          # seconds; grows exponentially with jitter
-RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524}
+# 529 is Anthropic's `overloaded_error`, and its canonical retryable status.
+# Leaving it out turned a transient overload into a permanent per-advisory
+# failure: paid for, then recorded as "could not classify".
+RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524, 529}
 
 # glm-5.3 and similar models "think" for tens of seconds per advisory unless
 # thinking is turned off. Classification is a short JSON verdict — thinking is
@@ -199,18 +202,55 @@ def _quota_skip_seconds(detail: str) -> float:
     return max(60.0, min(stated, ceiling))
 
 
-def _classify_http_error(status: int, detail: str) -> tuple[bool, bool, float]:
+def _parse_retry_after(value: str | None) -> float | None:
+    """Seconds from a Retry-After header, in either of its two forms.
+
+    The provider says exactly how long to wait; the code below used to guess
+    30 or 60 seconds instead. Guessing short wastes a call; guessing long
+    parks a key that already works.
+    """
+    if not value:
+        return None
+    text = str(value).strip()
+    try:
+        return max(0.0, float(text))          # delta-seconds form
+    except ValueError:
+        pass
+    try:                                       # HTTP-date form
+        from email.utils import parsedate_to_datetime
+
+        when = parsedate_to_datetime(text)
+        if when is None:
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        delta = (when - datetime.now(timezone.utc)).total_seconds()
+        return max(0.0, delta)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _classify_http_error(
+    status: int, detail: str, retry_after: str | None = None
+) -> tuple[bool, bool, float]:
     """Return (retryable, key_exhausted, skip_seconds)."""
     text = (detail or "").lower()
+    advised = _parse_retry_after(retry_after)
     if status in (401, 403):
         return False, True, 24 * 3600
     if status == 429:
         if any(marker in text for marker in _QUOTA_MARKERS):
+            # A quota reset time parsed from the body is more specific than
+            # Retry-After, which some providers set to a generic window.
             return False, True, _quota_skip_seconds(text)
         if any(marker in text for marker in _RATE_MARKERS):
-            return True, True, 30
-        # Unknown 429: try the next key immediately, then backoff.
-        return True, True, 60
+            return True, True, advised if advised is not None else 30
+        # Unknown 429: try the next key, then back off.
+        return True, True, advised if advised is not None else 60
+    if status in RETRYABLE_STATUS and advised is not None:
+        # e.g. 503 with Retry-After. Park this key for as long as the provider
+        # asked rather than hammering it on the next attempt.
+        return True, True, advised
     return status in RETRYABLE_STATUS, False, 0
 
 
@@ -412,10 +452,14 @@ def _call_messages(cfg: AIConfig, system: str, user: str,
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(cfg.messages_url, data=data, method="POST")
     req.add_header("content-type", "application/json")
-    req.add_header("authorization", f"Bearer {auth}")
-    if cfg.provider != "glm":
-        # Anthropic Messages API wants the key on this header too. Some proxies
-        # in front of it also accept a bearer token; harmless to send both.
+    if cfg.provider == "glm":
+        req.add_header("authorization", f"Bearer {auth}")
+    else:
+        # x-api-key only. The comment here used to say sending Authorization:
+        # Bearer alongside it was "harmless"; against api.anthropic.com it is a
+        # documented 401, because presenting two credentials is an error rather
+        # than a fallback. It went unnoticed only because the endpoints in use
+        # were proxies that ignored one of them.
         req.add_header("x-api-key", auth)
         req.add_header("anthropic-version", ANTHROPIC_VERSION)
     # Some proxy endpoints sit behind Cloudflare which returns error 1010 for the default
@@ -428,7 +472,14 @@ def _call_messages(cfg: AIConfig, system: str, user: str,
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")[:500]
         logger.warning("AI provider HTTP %s: %s", e.code, detail)
-        retryable, exhausted, skip_for = _classify_http_error(e.code, detail)
+        retry_after = None
+        try:
+            retry_after = e.headers.get("Retry-After") if e.headers else None
+        except Exception:
+            retry_after = None
+        retryable, exhausted, skip_for = _classify_http_error(
+            e.code, detail, retry_after
+        )
         if exhausted and auth:
             cfg.mark_skip_token(auth, skip_for)
         if e.code == 429 and exhausted and not retryable:
