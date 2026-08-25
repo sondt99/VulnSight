@@ -31,7 +31,7 @@ import urllib.request
 import zipfile
 
 from .config import DATA_DIR
-from .cvss import base_score, base_score_v4, severity_from_score
+from .cvss import base_score, is_v4_vector, severity_from_score
 from .cwe_categories import category_keywords, normalize_cwe_id
 from .query_filters import matches_common_filters
 
@@ -65,6 +65,13 @@ _MEM: dict[str, tuple[float, list[dict]]] = {}
 _MEM_TTL = 3600   # seconds – evict cached records older than 1 hour
 _MEM_MAX = 5      # max ecosystems kept in memory at once
 _DOWNLOAD_LOCK = threading.Lock()
+# _MEM is read and mutated from every request thread. It used to be touched
+# unguarded, which gave two real races: a check-then-get that could read an
+# entry another thread had just evicted, and an eviction where two threads
+# picked the same victim — the second `del` raising KeyError, or `min()` raising
+# "dictionary changed size during iteration". Neither is an OsvError, so
+# neither was caught, and both surfaced as a 500 for the whole search.
+_MEM_LOCK = threading.Lock()
 
 
 class OsvError(RuntimeError):
@@ -137,22 +144,28 @@ def normalize_osv(rec: dict) -> dict:
 
     cwes = list((rec.get("database_specific") or {}).get("cwe_ids") or [])
 
-    # severity: prefer qualitative from database_specific, else compute CVSS.
-    # Try v4 first, then fall back to v3.
+    # Score from the v3 vector, which is computed exactly per the spec. v4 used
+    # to be tried first, which meant the 922 records carrying both got the
+    # made-up v4 number in place of the correct v3 one. v4 is no longer scored
+    # at all (see cvss.is_v4_vector); the vector is still carried so an operator
+    # can look it up, and severity for a v4-only record comes from the
+    # publisher's own qualitative rating.
     ds_sev = (rec.get("database_specific") or {}).get("severity")
     cvss_score = None
+    cvss_vector = None
     for s in rec.get("severity") or []:
-        stype = str(s.get("type", ""))
-        if stype == "CVSS_V4":
-            cvss_score = base_score_v4(s.get("score", ""))
-            if cvss_score is not None:
+        if str(s.get("type", "")).startswith("CVSS_V3"):
+            score = base_score(s.get("score", ""))
+            if score is not None:
+                cvss_score, cvss_vector = score, s.get("score", "")
                 break
-    if cvss_score is None:
-        for s in rec.get("severity") or []:
-            if str(s.get("type", "")).startswith("CVSS_V3"):
-                cvss_score = base_score(s.get("score", ""))
-                if cvss_score is not None:
-                    break
+    if cvss_vector is None:
+        # No usable v3. Surface whatever vector there is, unscored.
+        cvss_vector = next(
+            (s.get("score", "") for s in rec.get("severity") or []
+             if is_v4_vector(s.get("score", ""))),
+            None,
+        )
     if ds_sev and str(ds_sev).upper() in _QUAL_MAP:
         severity = _QUAL_MAP[str(ds_sev).upper()]
     else:
@@ -193,6 +206,10 @@ def normalize_osv(rec: dict) -> dict:
         "description": rec.get("details") or "",
         "severity": severity,
         "cvss_score": cvss_score,
+        # The vector the score came from, or the v4 vector when there is no
+        # score. A v4-only advisory now shows its vector rather than a number
+        # nothing computed honestly.
+        "cvss_vector": cvss_vector,
         "cwes": cwes,
         "packages": packages,
         "ecosystems": sorted(ecos),
@@ -222,14 +239,17 @@ def _load_records(ghsa_ecosystem: str, force: bool = False) -> list[dict]:
     if not osv_eco:
         raise OsvError(f"ecosystem '{ghsa_ecosystem}' not supported by OSV bulk mode")
 
-    # Fast path: return cached records if within TTL.
-    if not force and ghsa_ecosystem in _MEM:
-        loaded_at, records = _MEM[ghsa_ecosystem]
-        if (time.time() - loaded_at) < _MEM_TTL:
-            return records
+    # Fast path: return cached records if within TTL. One lookup under the lock,
+    # so the entry cannot be evicted between the membership test and the read.
+    if not force:
+        with _MEM_LOCK:
+            entry = _MEM.get(ghsa_ecosystem)
+        if entry is not None and (time.time() - entry[0]) < _MEM_TTL:
+            return entry[1]
 
     path = download_ecosystem(osv_eco, force=force)
     records: list[dict] = []
+    skipped = 0
     try:
         with zipfile.ZipFile(path) as zf:
             for name in zf.namelist():
@@ -237,19 +257,32 @@ def _load_records(ghsa_ecosystem: str, force: bool = False) -> list[dict]:
                     continue
                 try:
                     rec = json.loads(zf.read(name))
-                except (json.JSONDecodeError, KeyError):
-                    logger.debug("skipping unparsable OSV record %s in %s", name, path)
-                    continue
-                records.append(normalize_osv(rec))
+                    records.append(normalize_osv(rec))
+                except Exception:
+                    # normalize_osv used to sit outside this block, and the
+                    # outer handler catches only archive errors, so one record
+                    # of the wrong shape — a JSON array where an object was
+                    # expected raises AttributeError — escaped as a 500 for the
+                    # entire search, not just for OSV. An export with 226,880
+                    # records should not be all-or-nothing on any one of them.
+                    skipped += 1
+                    logger.debug("skipping unusable OSV record %s in %s", name, path)
     except (OSError, zipfile.BadZipFile) as e:
         raise OsvError(f"invalid OSV bulk archive for {osv_eco}: {e}") from e
 
-    _MEM[ghsa_ecosystem] = (time.time(), records)
+    if skipped:
+        # At INFO, not debug: silent data loss is the failure mode this whole
+        # tool exists to avoid.
+        logger.info("Skipped %d unusable record(s) of %d in %s",
+                    skipped, skipped + len(records), os.path.basename(path))
 
-    # Cap the number of ecosystems held in memory.
-    if len(_MEM) > _MEM_MAX:
-        oldest = min(_MEM, key=lambda k: _MEM[k][0])
-        del _MEM[oldest]
+    with _MEM_LOCK:
+        _MEM[ghsa_ecosystem] = (time.time(), records)
+        # Cap the number of ecosystems held in memory. Inside the lock, so two
+        # threads cannot choose the same victim.
+        while len(_MEM) > _MEM_MAX:
+            oldest = min(_MEM, key=lambda k: _MEM[k][0])
+            del _MEM[oldest]
 
     return records
 

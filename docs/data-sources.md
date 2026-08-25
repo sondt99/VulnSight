@@ -110,5 +110,41 @@ four-source query. Sorting *by* EPSS necessarily enriches everything first.
 An advisory with no EPSS data renders nothing — never a `0.00%`, which would be a
 fabricated measurement.
 
-**CVSS** vectors are parsed locally (`modules/cvss.py`, spec-exact v3.0/v3.1
-rounding) rather than trusted from whichever source supplied them.
+**CVSS.** OSV vectors are parsed locally (`modules/cvss.py`, spec-exact v3.0/v3.1
+`Roundup`) rather than trusted from whichever source supplied them. GHSA and NVD
+supply a number already, and that number is used as-is.
+
+**CVSS v4.0 vectors are not scored.** Scoring v4 requires the ~270-entry
+MacroVector table from the specification. The approximation that used to stand
+in for it ignored `PR`, `UI` and `AT` and took the maximum over all six CIA
+sub-metrics, so subsequent-system impact counted the same as vulnerable-system
+impact.
+
+How wrong it was, measured rather than argued. Every v4-only record in the
+cached exports carries the publisher's own qualitative severity, which gives
+1,104 cases to check the approximation against:
+
+| Approximation vs. publisher | Records |
+|---|---|
+| agreed | 442 (40%) |
+| **overstated** | **650 (59%)** |
+| understated | 12 (1%) |
+
+The overstatements were not marginal: 351 records went `high` → `critical` and
+122 went `medium` → `critical`. In a tool that decides which vulnerabilities a
+person looks at, that is the expensive direction to be wrong in — `critical`
+gets triaged, `unknown` gets checked. So it was removed rather than tuned.
+
+Nothing is lost by that. Measured over the cached Go and Maven exports (15,686
+records):
+
+| Record shape | Count | What it gets |
+|---|---|---|
+| v3 only | 8,875 | the exact v3 score |
+| v4 **and** v3 | 922 | the exact v3 score — v4 used to win here, wrongly |
+| v4 only | 1,104 | no score; severity from `database_specific.severity`, which **all 1,104** carry |
+| no CVSS | 4,969 | no score |
+
+A v4-only advisory exposes its vector as `cvss_vector` so you can score it
+yourself, and `cvss_score` is `null` rather than a number nothing computed
+honestly.

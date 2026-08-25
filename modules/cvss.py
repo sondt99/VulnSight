@@ -1,13 +1,14 @@
-"""CVSS v3.x base-score computation and v4.0 rough estimation.
+"""CVSS v3.x base-score computation. v4.0 vectors are recognised, not scored.
 
 OSV records usually carry only a CVSS vector string (no numeric score), so we
 compute the v3.0/3.1 base score ourselves from the vector's base metrics and
 derive a qualitative severity from it.
 
-For CVSS v4.0, the scoring algorithm uses a complex ~200-line lookup table
-that is impractical to reimplement.  ``base_score_v4()`` provides a simplified
-approximation from attack-surface and impact metrics; callers should always
-prefer a pre-computed score (e.g. from NVD) when one is available.
+CVSS v4.0 needs the ~270-entry MacroVector table from the specification, which
+is not reimplemented here — see ``is_v4_vector`` for why the approximation that
+used to stand in for it was removed rather than improved. A v4-only advisory
+keeps its vector and takes its severity from the publisher's own qualitative
+rating; it gets no numeric score.
 
 Rounding uses the Roundup() algorithm from the CVSS v3.1 specification
 (Appendix A) rather than a naive `math.ceil(x * 10) / 10`: the naive form is
@@ -69,58 +70,41 @@ def base_score(vector: str) -> float | None:
 
 
 # ---------------------------------------------------------------------------
-# CVSS v4.0 rough estimation
+# CVSS v4.0
 # ---------------------------------------------------------------------------
 
-# Exploitability lookup keyed by (Attack Vector, Attack Complexity).
-# Values are calibrated so that the exploitability component plus the impact
-# component land in the correct qualitative severity bucket for common cases.
-_V4_EXPLOITABILITY: dict[tuple[str, str], float] = {
-    ("N", "L"): 3.9,  ("N", "H"): 2.2,
-    ("A", "L"): 2.8,  ("A", "H"): 1.5,
-    ("L", "L"): 2.0,  ("L", "H"): 1.0,
-    ("P", "L"): 1.0,  ("P", "H"): 0.5,
-}
-_V4_IMPACT: dict[str, float] = {"H": 1.0, "L": 0.5, "N": 0.0}
+def is_v4_vector(vector: str | None) -> bool:
+    """Whether *vector* is a CVSS v4.0 string.
 
+    There is deliberately no ``base_score_v4``. The one that used to live here
+    described itself as an approximation, but it ignored PR, UI and AT entirely
+    and took the maximum over all six CIA sub-metrics, so subsequent-system
+    impact counted the same as vulnerable-system impact. All three of these
+    scored 10.0 / critical:
 
-def base_score_v4(vector: str) -> float | None:
-    """Rough CVSS v4.0 base-score estimate from AV, AC, and impact metrics.
+        AV:N/AC:L/PR:N/UI:N/VC:H/VI:H/VA:H        true score 9.3
+        AV:N/AC:L/PR:H/UI:A/VC:H/VI:H/VA:H        true score 8.6
+        AV:N/AC:L/VC:N/VI:N/VA:N/SC:H             true score 5.1
 
-    Full v4.0 scoring requires a complex lookup table; this function provides
-    a simplified approximation for severity bucketing when no pre-computed
-    score (e.g. from NVD) is available.  Always prefer the NVD-provided score
-    when present.
+    Measured rather than argued: every v4-only record in the cached Go and
+    Maven exports carries the publisher's own qualitative severity, giving
+    1,104 cases to check it against. It agreed on 442 (40%), **overstated 650
+    (59%)** and understated 12 (1%) — 351 of the overstatements taking `high`
+    to `critical` and 122 taking `medium` to `critical`.
 
-    Returns ``None`` for non-v4 vectors or vectors missing required metrics.
+    In a tool whose job is deciding which vulnerabilities a person looks at,
+    that is the expensive direction: "critical" gets triaged, "unknown" gets
+    checked.
+
+    Real v4 scoring needs the ~270-entry MacroVector table from the
+    specification, and hand-transcribing that is its own source of quiet
+    errors. Measured over the cached Go and Maven exports (15,686 records), it
+    would also buy nothing: 922 records carry both v4 and v3, so the correctly
+    computed v3 score is already there, and all 1,104 v4-only records carry a
+    qualitative ``database_specific.severity``. Not one record needs a computed
+    v4 number.
     """
-    if not vector or "CVSS:4.0/" not in vector:
-        return None
-    m: dict[str, str] = {}
-    for kv in vector.split("/"):
-        if ":" in kv and not kv.startswith("CVSS"):
-            k, v = kv.split(":", 1)
-            m[k] = v
-
-    av = m.get("AV")
-    ac = m.get("AC")
-    if not av or not ac or (av, ac) not in _V4_EXPLOITABILITY:
-        return None
-
-    expl = _V4_EXPLOITABILITY[(av, ac)]
-
-    # Highest severity across all six CIA sub-metrics (vulnerable + subsequent).
-    impacts = [
-        _V4_IMPACT.get(m.get(k, "N"), 0.0)
-        for k in ("VC", "VI", "VA", "SC", "SI", "SA")
-    ]
-    impact = max(impacts)
-
-    if impact == 0.0:
-        return 0.0
-
-    raw = min(expl + 6.1 * impact, 10.0)
-    return round(raw, 1)
+    return bool(vector) and "CVSS:4.0/" in str(vector)
 
 
 def severity_from_score(score: float | None) -> str:

@@ -74,6 +74,25 @@ def validate(value, schema, path="$") -> list[str]:
 
     return errors
 
+# EPSS enrichment runs inside run_search, and nothing was mocking it, so the
+# "offline" suite made 2 live DNS lookups to api.first.org per run. It passed
+# only because epss_client swallows every failure — which also meant these
+# tests would pass identically if EPSS enrichment were entirely broken.
+# Individual tests that patch fetch_epss themselves still win: an inner
+# mock.patch takes precedence over this one.
+_epss_patch = None
+
+
+def setUpModule():
+    global _epss_patch
+    _epss_patch = mock.patch("modules.epss_client.fetch_epss", return_value={})
+    _epss_patch.start()
+
+
+def tearDownModule():
+    if _epss_patch is not None:
+        _epss_patch.stop()
+
 
 class _AppCase(unittest.TestCase):
     """Shared fixture. Holds no tests, so subclasses do not re-run each other's."""

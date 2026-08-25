@@ -23,6 +23,25 @@ from samples import NVD_VULN, OSV_GHSA, SAMPLE, SORT_A, SORT_B, SORT_C, make_sor
 
 import app as app_module
 
+# EPSS enrichment runs inside run_search, and nothing was mocking it, so the
+# "offline" suite made 26 live DNS lookups to api.first.org per run. It passed
+# only because epss_client swallows every failure — which also meant these
+# tests would pass identically if EPSS enrichment were entirely broken.
+# Individual tests that patch fetch_epss themselves still win: an inner
+# mock.patch takes precedence over this one.
+_epss_patch = None
+
+
+def setUpModule():
+    global _epss_patch
+    _epss_patch = mock.patch("modules.epss_client.fetch_epss", return_value={})
+    _epss_patch.start()
+
+
+def tearDownModule():
+    if _epss_patch is not None:
+        _epss_patch.stop()
+
 
 class TestFlaskApp(unittest.TestCase):
     def setUp(self):

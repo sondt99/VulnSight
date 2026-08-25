@@ -91,6 +91,99 @@ class TestAIParsing(unittest.TestCase):
         self.assertTrue(aggregate["cached"])
 
 
+class TestHttpErrorPolicy(unittest.TestCase):
+    def test_overloaded_is_retryable(self):
+        """529 is Anthropic's overloaded_error, and was missing from the set.
+
+        Without it a transient overload became a permanent per-advisory
+        failure: paid for, then recorded as "could not classify".
+        """
+        self.assertIn(529, ai_classifier.RETRYABLE_STATUS)
+        retryable, _, _ = ai_classifier._classify_http_error(529, "overloaded")
+        self.assertTrue(retryable)
+
+    def test_retry_after_seconds_is_honoured(self):
+        """The provider says how long to wait; the code used to guess 30 or 60."""
+        _, _, skip = ai_classifier._classify_http_error(429, "rate_limit", "12")
+        self.assertEqual(skip, 12)      # rate-marker branch, was a flat 30
+        _, _, skip = ai_classifier._classify_http_error(429, "something odd", "45")
+        self.assertEqual(skip, 45)      # unknown-429 branch, was a flat 60
+
+    def test_retry_after_http_date_is_honoured(self):
+        from email.utils import format_datetime
+        from datetime import timezone as tz
+        when = datetime.now(tz.utc) + timedelta(seconds=90)
+        _, _, skip = ai_classifier._classify_http_error(
+            429, "rate_limit", format_datetime(when))
+        self.assertGreater(skip, 60)
+        self.assertLessEqual(skip, 95)
+
+    def test_a_past_retry_after_never_goes_negative(self):
+        self.assertEqual(
+            ai_classifier._parse_retry_after("Thu, 01 Jan 1970 00:00:00 GMT"), 0.0)
+        self.assertEqual(ai_classifier._parse_retry_after("-5"), 0.0)
+
+    def test_junk_retry_after_falls_back_to_the_guess(self):
+        for value in (None, "", "soon", "12 seconds please"):
+            with self.subTest(value=value):
+                self.assertIsNone(ai_classifier._parse_retry_after(value))
+                _, _, skip = ai_classifier._classify_http_error(
+                    429, "rate_limit", value)
+                self.assertEqual(skip, 30)
+
+    def test_a_transient_503_never_parks_the_key(self):
+        """skip_seconds is spent by marking the key exhausted, and that cooldown
+        is persisted to disk. Honouring Retry-After here would park a single-key
+        setup's only key for minutes over a transient blip."""
+        for detail, header in (("service unavailable", "300"),
+                               ("bad gateway", "60"),
+                               ("service unavailable", None)):
+            with self.subTest(header=header):
+                retryable, exhausted, skip = ai_classifier._classify_http_error(
+                    503, detail, header)
+                self.assertTrue(retryable)
+                self.assertFalse(exhausted)
+                self.assertEqual(skip, 0)
+
+    def test_a_parsed_quota_reset_still_beats_retry_after(self):
+        """The body's reset time is specific; Retry-After is often a generic window."""
+        retryable, exhausted, skip = ai_classifier._classify_http_error(
+            429, "your quota has been exhausted, reset at 2026-08-26 10:00:00", "60")
+        self.assertFalse(retryable)
+        self.assertTrue(exhausted)
+        self.assertNotEqual(skip, 60)
+
+
+class TestRequestHeaders(unittest.TestCase):
+    def _headers_for(self, provider):
+        """Capture the outgoing headers. The response shape is beside the point,
+        so the request is allowed to fail after the headers have been seen."""
+        cfg = ai_classifier.AIConfig(provider, "https://x", ["tok"], "m")
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured.update({k.lower(): v for k, v in req.header_items()})
+            raise urllib.error.URLError("captured")
+
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            with self.assertRaises(ai_classifier.AIError):
+                ai_classifier._call_messages(cfg, "sys", "user", token="tok")
+        self.assertTrue(captured, "no headers were captured")
+        return captured
+
+    def test_anthropic_sends_only_x_api_key(self):
+        """Carrying two credentials is a documented 401 against the real API."""
+        headers = self._headers_for("anthropic")
+        self.assertEqual(headers.get("x-api-key"), "tok")
+        self.assertNotIn("authorization", headers)
+        self.assertIn("anthropic-version", headers)
+
+    def test_glm_sends_only_a_bearer_token(self):
+        headers = self._headers_for("glm")
+        self.assertEqual(headers.get("authorization"), "Bearer tok")
+        self.assertNotIn("x-api-key", headers)
+
+
 class TestConfig(unittest.TestCase):
     def test_config_detection(self):
         cfg = ai_classifier.AIConfig("anthropic", "https://x", ["tok"], "PRO")

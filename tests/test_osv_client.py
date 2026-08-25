@@ -174,5 +174,55 @@ class TestFetchOsvNative(unittest.TestCase):
         self.assertEqual([record["ghsa_id"] for record in out], ["GO-2026-100"])
 
 
+class TestOneBadRecordDoesNotKillTheSearch(unittest.TestCase):
+    """normalize_osv used to sit outside the per-record try, and the outer
+    handler catches only archive errors — so one wrong-shaped record raised
+    AttributeError out of OSV entirely and 500'd the whole search."""
+
+    def _archive(self, entries, directory):
+        path = os.path.join(directory, "Go.zip")
+        with zipfile.ZipFile(path, "w") as zf:
+            for name, payload in entries.items():
+                zf.writestr(name, payload if isinstance(payload, str)
+                            else json.dumps(payload))
+        return path
+
+    def _load(self, entries):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = self._archive(entries, tmp)
+            osv_client._MEM.clear()
+            try:
+                with mock.patch.object(osv_client, "download_ecosystem",
+                                       return_value=archive):
+                    return osv_client._load_records("go")
+            finally:
+                osv_client._MEM.clear()
+
+    def test_a_json_array_where_an_object_belongs_is_skipped(self):
+        records = self._load({
+            "good1.json": {"id": "GO-2026-1", "affected": []},
+            "bad.json": ["not", "a", "dict"],
+            "good2.json": {"id": "GO-2026-2", "affected": []},
+        })
+        self.assertEqual(sorted(r["advisory_id"] for r in records),
+                         ["GO-2026-1", "GO-2026-2"])
+
+    def test_unparsable_json_is_still_skipped(self):
+        records = self._load({
+            "good.json": {"id": "GO-1", "affected": []},
+            "broken.json": "{not json",
+        })
+        self.assertEqual([r["advisory_id"] for r in records], ["GO-1"])
+
+    def test_skipped_records_are_reported_not_swallowed(self):
+        with self.assertLogs("modules.osv_client", level="INFO") as logs:
+            self._load({
+                "good.json": {"id": "GO-1", "affected": []},
+                "bad.json": ["nope"],
+            })
+        self.assertTrue(any("Skipped 1 unusable" in line for line in logs.output),
+                        logs.output)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

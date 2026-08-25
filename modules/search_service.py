@@ -363,6 +363,15 @@ def _merge_group(records: list[dict]) -> dict:
         value = next((record.get(field) for record in records if record.get(field)), None)
         if value is not None:
             merged[field] = value
+    # cvss_vector is set unconditionally, not through the loop above: only OSV
+    # produces it, and GHSA always wins as the base record, so a merged
+    # GHSA+OSV row inherited a base that has no such key and silently dropped
+    # the vector. That is the one field a v4-only advisory has instead of a
+    # score, so losing it left `cvss_score: null` with nothing to look up.
+    merged["cvss_vector"] = next(
+        (record.get("cvss_vector") for record in records if record.get("cvss_vector")),
+        None,
+    )
     return merged
 
 
