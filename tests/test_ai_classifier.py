@@ -131,6 +131,20 @@ class TestHttpErrorPolicy(unittest.TestCase):
                     429, "rate_limit", value)
                 self.assertEqual(skip, 30)
 
+    def test_a_transient_503_never_parks_the_key(self):
+        """skip_seconds is spent by marking the key exhausted, and that cooldown
+        is persisted to disk. Honouring Retry-After here would park a single-key
+        setup's only key for minutes over a transient blip."""
+        for detail, header in (("service unavailable", "300"),
+                               ("bad gateway", "60"),
+                               ("service unavailable", None)):
+            with self.subTest(header=header):
+                retryable, exhausted, skip = ai_classifier._classify_http_error(
+                    503, detail, header)
+                self.assertTrue(retryable)
+                self.assertFalse(exhausted)
+                self.assertEqual(skip, 0)
+
     def test_a_parsed_quota_reset_still_beats_retry_after(self):
         """The body's reset time is specific; Retry-After is often a generic window."""
         retryable, exhausted, skip = ai_classifier._classify_http_error(

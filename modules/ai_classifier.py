@@ -247,10 +247,11 @@ def _classify_http_error(
             return True, True, advised if advised is not None else 30
         # Unknown 429: try the next key, then back off.
         return True, True, advised if advised is not None else 60
-    if status in RETRYABLE_STATUS and advised is not None:
-        # e.g. 503 with Retry-After. Park this key for as long as the provider
-        # asked rather than hammering it on the next attempt.
-        return True, True, advised
+    # Retry-After is honoured for 429 only, and deliberately not for the other
+    # retryable statuses. skip_seconds is spent by marking the key exhausted,
+    # which persists a cooldown to disk and survives a restart — turning a
+    # transient 503 into a key parked for minutes, on a single-key setup with
+    # no other key to rotate to. Exponential backoff already handles those.
     return status in RETRYABLE_STATUS, False, 0
 
 
