@@ -11,7 +11,8 @@ whose response shape is held stable.
 
 The unversioned aliases — `/api/meta`, `/api/cwes`, `/api/osv/status`,
 `/api/search`, `/api/jobs`, `/api/jobs/<job_id>`, `/api/ai/classify`,
-`/api/ai/test` — are kept indefinitely, with no deprecation planned. The UI
+`/api/ai/test`, `/api/openapi.json` — are kept indefinitely, with no
+deprecation planned. The UI
 still uses them. Both spellings hit the same handler, share the same rate-limit
 bucket, and return byte-identical payloads.
 
@@ -32,6 +33,35 @@ bucket, and return byte-identical payloads.
 - Every `/api/` failure is JSON, including ones no handler produced: a wrong
   path is `404 {"error": "No such endpoint."}`, not a Werkzeug HTML page. Pages
   outside `/api/` still render HTML, since a browser is not a script.
+
+## Machine-readable description
+
+`GET /api/v1/openapi.json` (alias `/api/openapi.json`) serves an OpenAPI 3.1
+document covering every endpoint, request schema and response schema. Load it
+into Swagger Editor, Postman, Insomnia, or a client generator:
+
+```bash
+curl -s localhost:5000/api/v1/openapi.json > vulnsight.json
+openapi-generator generate -i vulnsight.json -g python -o ./client
+```
+
+It is served with an ETag, so `If-None-Match` gets a `304`.
+
+`GET /api/docs` renders that document as a browsable reference page.
+
+The document is written by hand and verified by machine, which is the only way
+it stays true: `tests/test_openapi.py` fails the build if a route exists with no
+description, if a description exists for no route, if the methods disagree — and,
+most usefully, if a **real response from the app** does not validate against the
+schema the document claims for it. A description a generator believes but the
+server does not honour is worse than no description at all.
+
+Deliberately **not** Swagger UI. Vendoring it means ~1.4 MB of minified
+third-party JavaScript inside a tool whose stated constraint is that an operator
+can read it end to end before pointing it at their credentials, plus relaxing
+`style-src` to `'unsafe-inline'` for the styles it injects at runtime. For eight
+endpoints, neither trade is worth it — and the spec itself is the interoperable
+artefact, so nothing is lost.
 
 ---
 

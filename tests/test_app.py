@@ -617,9 +617,12 @@ class TestApiVersioning(unittest.TestCase):
 
     def test_every_api_route_has_a_v1_twin(self):
         """Fails when a new /api/ route ships without its versioned alias."""
+        # /api/docs is an HTML reference page, not versioned API surface: it
+        # renders whatever the current spec says, so there is nothing to pin.
+        not_api_surface = {"/api/docs"}
         rules = [
             str(rule) for rule in self.app.url_map.iter_rules()
-            if str(rule).startswith("/api/")
+            if str(rule).startswith("/api/") and str(rule) not in not_api_surface
         ]
         legacy = {r for r in rules if not r.startswith("/api/v1/")}
         versioned = {

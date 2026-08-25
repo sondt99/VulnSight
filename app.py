@@ -22,6 +22,7 @@ from modules import (
     cache,
     config,
     jobs,
+    openapi,
     osv_client,
     search_service,
     security,
@@ -381,6 +382,31 @@ def create_app():
         if error:
             return error
         return jsonify(ai_classifier.ping())
+
+    @app.route("/api/docs")
+    def api_docs():
+        """Human-readable reference, rendered in the browser from the spec.
+
+        Not Swagger UI: that means ~1.4 MB of vendored minified JavaScript in a
+        tool whose stated constraint is that an operator can read it end to end,
+        and relaxing style-src to 'unsafe-inline' for the styles it injects at
+        runtime. The spec itself remains the interoperable artefact — load
+        /api/v1/openapi.json into Swagger Editor, Postman or a generator.
+        """
+        return render_template("apidocs.html", csp_nonce=g.get("csp_nonce", ""))
+
+    @app.route("/api/openapi.json")
+    @app.route("/api/v1/openapi.json")
+    def api_openapi():
+        """The machine-readable contract, for client generators and Postman."""
+        payload = openapi.build_spec()
+        etag = f'W/"openapi-{openapi.API_VERSION}"'
+        if request.headers.get("If-None-Match") == etag:
+            return "", 304
+        response = jsonify(payload)
+        response.headers["ETag"] = etag
+        response.headers["Cache-Control"] = "private, max-age=3600"
+        return response
 
     @app.route("/api/osv/status")
     @app.route("/api/v1/osv/status")
